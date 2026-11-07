@@ -13,6 +13,7 @@
 
 #include "assembler/assembler.h"
 #include "optimizer/dependency_graph.h"
+#include "optimizer/timeline.h"
 #include "processor/rvss/rvss_processor.h"
 
 namespace optimizer_test
@@ -100,6 +101,25 @@ inline Kites::AssembledProgram withOrder(const Kites::AssembledProgram &program,
         }
     }
     return reordered;
+}
+
+// The program with the timeline's bubbles inserted as real NOP instructions, one position per word.
+// Only valid for straight-line code, where inserting words cannot disturb a branch offset.
+inline Kites::AssembledProgram paddedWithNops(const Kites::AssembledProgram &program,
+                                              const Kites::optimizer::Timeline &timeline)
+{
+    constexpr uint32_t kNopWord = 0x00000013; // addi x0, x0, 0
+    Kites::AssembledProgram result = program;
+    result.text_buffer.clear();
+    for (size_t position = 0; position < program.text_buffer.size(); ++position)
+    {
+        for (int bubble = 0; bubble < timeline.bubblesBefore[position]; ++bubble)
+        {
+            result.text_buffer.push_back(kNopWord);
+        }
+        result.text_buffer.push_back(program.text_buffer[position]);
+    }
+    return result;
 }
 
 // A uniformly random choice among the units that are ready at each step.
