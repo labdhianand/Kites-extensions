@@ -162,8 +162,10 @@ inline std::vector<size_t> randomLegalOrder(const Kites::optimizer::DependencyGr
 }
 
 // A random straight-line program (a single basic block) mixing integer and floating-point
-// arithmetic, loads and stores through two possibly-aliasing base registers, a base register that
-// moves mid-program, and multi-instruction `li` expansions.
+// arithmetic, loads and stores, and multi-instruction `li` expansions. Memory is accessed through
+// five base registers that often alias: two constants (x10, x11), a pointer loaded back from memory
+// (x12, which the address analysis cannot see through), a base derived from it (x13), and a base
+// offset by an unknown amount (x15). Bases are moved and re-derived mid-program.
 //
 // With includeFloatingPoint false only integer instructions are generated. The pipelined
 // processor models only support the I and M extensions, so that is what their tests use.
@@ -175,7 +177,11 @@ inline std::string randomProgram(std::mt19937 &rng, size_t bodyLength = 16,
 
     auto gprName = [&]() { return "x" + std::to_string(pick(5, 9)); };
     auto fprName = [&]() { return "f" + std::to_string(pick(1, 4)); };
-    auto baseName = [&]() { return pick(0, 1) == 0 ? std::string("x10") : std::string("x11"); };
+    auto baseName = [&]()
+    {
+        static const char *bases[] = {"x10", "x11", "x12", "x13", "x15"};
+        return std::string(bases[pick(0, 4)]);
+    };
     auto wordOffset = [&]() { return std::to_string(pick(0, 3) * 4); };
 
     std::ostringstream out;
@@ -183,6 +189,11 @@ inline std::string randomProgram(std::mt19937 &rng, size_t bodyLength = 16,
     out << "li x10, " << kScratchBase << "\n";
     const char *secondBase[] = {"8192", "8196", "8200"};
     out << "li x11, " << secondBase[pick(0, 2)] << "\n";
+    out << "sw x10, 64(x10)\n";  // store a pointer ...
+    out << "lw x12, 64(x10)\n";  // ... and load it back: same value, but opaque to the analysis
+    out << "addi x13, x12, 4\n"; // derived from the opaque pointer
+    out << "andi x14, x5, 12\n";
+    out << "add x15, x10, x14\n"; // a base plus an offset the analysis cannot know
     if (includeFloatingPoint)
     {
         out << "fcvt.s.w f1, x5\nfcvt.s.w f2, x6\n";
@@ -190,7 +201,7 @@ inline std::string randomProgram(std::mt19937 &rng, size_t bodyLength = 16,
 
     for (size_t i = 0; i < bodyLength; ++i)
     {
-        switch (pick(0, includeFloatingPoint ? 14 : 11))
+        switch (pick(0, includeFloatingPoint ? 16 : 13))
         {
         case 0:
             out << "add " << gprName() << ", " << gprName() << ", " << gprName() << "\n";
@@ -226,9 +237,15 @@ inline std::string randomProgram(std::mt19937 &rng, size_t bodyLength = 16,
             out << "li " << gprName() << ", " << 100000 + pick(0, 3) << "\n";
             break;
         case 12:
-            out << "fadd.s " << fprName() << ", " << fprName() << ", " << fprName() << "\n";
+            out << "addi x13, x12, " << pick(0, 2) * 4 << "\n"; // re-derive from the pointer
             break;
         case 13:
+            out << "andi x14, " << gprName() << ", 12\nadd x15, x10, x14\n";
+            break;
+        case 14:
+            out << "fadd.s " << fprName() << ", " << fprName() << ", " << fprName() << "\n";
+            break;
+        case 15:
             if (pick(0, 1) == 0)
             {
                 out << "fsw " << fprName() << ", " << wordOffset() << "(" << baseName() << ")\n";

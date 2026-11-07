@@ -7,6 +7,8 @@
 #include <array>
 #include <optional>
 
+#include "optimizer/symbolic_value.h"
+
 namespace Kites
 {
 namespace optimizer
@@ -25,11 +27,13 @@ struct MemoryAccess
 {
     size_t node{0};
     bool isStore{false};
-    RegRef base{};
-    uint32_t baseVersion{0}; ///< how many times the base register was written before this access
-    int32_t offset{0};
+    SymbolicValue address; ///< base register's symbolic value plus the offset
     uint8_t size{0};
 };
+
+// Symbols 0..31 are the registers at block entry; results the analysis cannot see through are
+// named after the instruction that produced them.
+constexpr uint32_t kFirstOpaqueSymbol = 32;
 
 // What one unit reads from outside itself, writes, and accesses in memory.
 struct NodeAccesses
@@ -52,7 +56,7 @@ void addUnique(std::vector<RegRef> &list, RegRef reg)
 }
 
 NodeAccesses collectAccesses(const ProgramModel &model, const Unit &unit, size_t node,
-                             std::array<uint32_t, kGprCount> &baseVersions)
+                             SymbolicRegisters &registers)
 {
     NodeAccesses access;
     std::array<bool, kRegisterSlotCount> writtenInUnit{};
@@ -76,9 +80,8 @@ NodeAccesses collectAccesses(const ProgramModel &model, const Unit &unit, size_t
             MemoryAccess memory;
             memory.node = node;
             memory.isStore = info.klass == InstrClass::Store;
-            memory.base = info.memBase;
-            memory.baseVersion = baseVersions[info.memBase.index];
-            memory.offset = info.imm;
+            memory.address = registers.value(info.memBase.index)
+                                 .plusConstant(static_cast<uint64_t>(static_cast<int64_t>(info.imm)));
             memory.size = info.memSize;
             access.memory.push_back(memory);
         }
@@ -87,28 +90,26 @@ NodeAccesses collectAccesses(const ProgramModel &model, const Unit &unit, size_t
         {
             writtenInUnit[registerSlot(info.dest)] = true;
             addUnique(access.writes, info.dest);
-            if (info.dest.file == RegFile::Gpr)
-            {
-                ++baseVersions[info.dest.index];
-            }
         }
+        registers.execute(info, kFirstOpaqueSymbol + static_cast<uint32_t>(k));
     }
     return access;
 }
 
-// True only if the two accesses can be shown never to touch the same byte. This holds when they
-// use the same base register, nothing wrote that register in between, and their offset ranges do
-// not overlap. Register dependencies keep the base writes ordered around both accesses, so the
-// proof still holds after reordering.
+// True only if the two accesses can be shown never to touch the same byte: their addresses have
+// the same symbolic part, so they differ by a known constant, and that constant keeps the byte
+// ranges apart. The registers feeding each address keep their producers ordered around the access
+// (register dependencies), so every address is still computed from the same values after
+// reordering and the proof still holds.
 bool provablyDisjoint(const MemoryAccess &a, const MemoryAccess &b)
 {
-    if (!(a.base == b.base) || a.baseVersion != b.baseVersion)
+    if (!a.address.sameTermsAs(b.address))
     {
         return false;
     }
-    const int64_t aEnd = static_cast<int64_t>(a.offset) + a.size;
-    const int64_t bEnd = static_cast<int64_t>(b.offset) + b.size;
-    return aEnd <= b.offset || bEnd <= a.offset;
+    // b's start relative to a's start, as a signed distance.
+    const int64_t distance = static_cast<int64_t>(b.address.constant - a.address.constant);
+    return distance >= a.size || -distance >= b.size;
 }
 
 void addEdge(DependencyGraph &graph, size_t from, size_t to, DependencyKind kind)
@@ -170,14 +171,14 @@ DependencyGraph buildDependencyGraph(const ProgramModel &model, const BasicBlock
 
     std::array<std::optional<size_t>, kRegisterSlotCount> lastWriter{};
     std::array<std::vector<size_t>, kRegisterSlotCount> readersSinceWrite{};
-    std::array<uint32_t, kGprCount> baseVersions{};
+    SymbolicRegisters registers;
     std::vector<MemoryAccess> previousAccesses;
     std::optional<size_t> lastFence;
 
     for (size_t node = 0; node < block.unitCount; ++node)
     {
         const Unit &unit = model.units[block.firstUnit + node];
-        const NodeAccesses access = collectAccesses(model, unit, node, baseVersions);
+        const NodeAccesses access = collectAccesses(model, unit, node, registers);
 
         for (const RegRef &reg : access.reads)
         {
