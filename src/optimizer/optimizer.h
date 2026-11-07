@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "optimizer/cost_model.h"
+#include "optimizer/loop_unroller.h"
 
 namespace Kites
 {
@@ -23,6 +24,10 @@ struct OptimizeOptions
 
     /// Remove NOP padding and keep only the padding the variant really needs.
     bool dropNops{false};
+
+    /// Unroll counted loops by up to this factor before scheduling (see loop_unroller.h). 1 means
+    /// no unrolling. Unrolling changes the code size, so it is off unless asked for.
+    int unrollFactor{1};
 };
 
 /// What happened to one basic block.
@@ -40,6 +45,12 @@ struct OptimizeResult
 {
     std::string source;  ///< the suggested source (identical to the input if nothing changed)
     bool changed{false};
+
+    /// Loops found, and whether they were unrolled. Empty unless unrolling was asked for.
+    std::vector<LoopReport> loops;
+
+    /// The scheduled blocks. Their line numbers refer to the unrolled source when loops were
+    /// unrolled.
     std::vector<BlockSummary> blocks;
 
     /// Sums over all blocks of the static slot estimates. These are per pass through each block,
