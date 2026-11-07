@@ -9,6 +9,7 @@
 #include "alu.h"
 #include "common/assembled_program.h"
 #include "memory_controller.h"
+#include "processor/memory_timing.h"
 #include "processor/processor_state.h"
 #include "processor/registers.h"
 #include "ui/processor_tab/circuit_scene.h"
@@ -119,6 +120,9 @@ class ProcessorBase : public QObject
 
     MemoryController memory_controller_;
     RegisterFile registers_;
+
+    /// How long loads take. Off by default, so a cache miss costs nothing (see memory_timing.h).
+    MemoryTiming memory_timing_;
 
     alu::Alu alu_;
 

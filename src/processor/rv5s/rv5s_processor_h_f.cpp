@@ -201,6 +201,10 @@ void RV5StageProcessorHF::Reset()
 
 void RV5StageProcessorHF::Step()
 {
+    if (wait_for_blocking_load())
+    {
+        return;
+    }
     begin_step_delta();
 
     // 1. Execute back stages (WB -> MEM -> EX)
@@ -224,6 +228,10 @@ void RV5StageProcessorHF::Step()
         // Pipeline is free. Check for a NEW hazard using the external HDU function.
         stalls_needed = check_data_hazard(if_id_reg_, id_ex_reg_, ex_mem_reg_,
                                           true /* is_forwarding_enabled */);
+        if (stalls_needed == 0 && waits_for_late_load(if_id_reg_.instruction))
+        {
+            stalls_needed = 1; // re-checked every cycle until the load arrives
+        }
         if (stalls_needed > 0)
         {
             // Start the stall: stalls_needed cycles total. 1 cycle is handled now.

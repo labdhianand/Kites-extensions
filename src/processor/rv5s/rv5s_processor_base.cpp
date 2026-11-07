@@ -1,6 +1,7 @@
 #include "common/debug_colors.h"
 #include "common/instructions.h"
 #include "processor/rv5s/rv5s_processor_base.h"
+#include "optimizer/instr_info.h"
 #include <thread>
 
 namespace Kites
@@ -92,6 +93,7 @@ void RV5StageVM_Base::Reset()
     cycle_s_              = 0;
     stall_cycles_         = 0;
     pc_redirected_        = false;
+    memory_latency_       = MemoryLatencyState{};
     last_breakpoint_pc_.reset(); // Clear breakpoint tracking on reset
 
     registers_.Reset();
@@ -121,6 +123,7 @@ void RV5StageVM_Base::begin_step_delta()
     current_delta_.pipeline_register_change.old_id_ex_reg  = id_ex_reg_;
     current_delta_.pipeline_register_change.old_ex_mem_reg = ex_mem_reg_;
     current_delta_.pipeline_register_change.old_mem_wb_reg = mem_wb_reg_;
+    current_delta_.old_memory_latency = memory_latency_;
 }
 
 void RV5StageVM_Base::finalize_step_delta()
@@ -135,6 +138,7 @@ void RV5StageVM_Base::finalize_step_delta()
     current_delta_.pipeline_register_change.new_id_ex_reg  = id_ex_reg_;
     current_delta_.pipeline_register_change.new_ex_mem_reg = ex_mem_reg_;
     current_delta_.pipeline_register_change.new_mem_wb_reg = mem_wb_reg_;
+    current_delta_.new_memory_latency = memory_latency_;
 
     undo_stack_.push(current_delta_);
     while (!redo_stack_.empty())
@@ -218,6 +222,15 @@ void RV5StageVM_Base::pipeline_decode()
     {
         id_ex_reg_.reg1_data = registers_.ReadGpr(id_ex_reg_.rs1);
         id_ex_reg_.reg2_data = registers_.ReadGpr(id_ex_reg_.rs2);
+    }
+
+    // A newer write to a register makes any load still on its way to it irrelevant: nothing will
+    // read that load's value any more, so nothing has to wait for it (see memory_timing.h).
+    const optimizer::InstrInfo decoded = optimizer::decodeInstruction(instruction, 0);
+    if (decoded.dest.isValid())
+    {
+        memory_latency_.readyCycle[(decoded.dest.file == optimizer::RegFile::Fpr ? 32 : 0) +
+                                   decoded.dest.index] = 0;
     }
 
     // Pass all control signals to the next stage
@@ -452,6 +465,8 @@ void RV5StageVM_Base::pipeline_memory()
     bool is_D_Instruction = instruction_set::isDInstruction(mem_wb_reg_.instruction);
 
     // Memory Access
+    const size_t l1MissesBefore = memory_controller_.getL1Cache()->getMissCount();
+    const size_t l2MissesBefore = memory_controller_.getL2Cache()->getMissCount();
     if (ex_mem_reg_.mem_read)
     {
         // Load instruction: Result available at end of this stage (Load-Use still needs 1 NOP
@@ -515,6 +530,7 @@ void RV5StageVM_Base::pipeline_memory()
             }
             }
         }
+        charge_load_latency(l1MissesBefore, l2MissesBefore);
     }
     else if (ex_mem_reg_.mem_write)
     {
@@ -828,6 +844,81 @@ bool RV5StageVM_Base::is_pipeline_drained() const
     return true;
 }
 
+bool RV5StageVM_Base::wait_for_blocking_load()
+{
+    if (memory_latency_.freezeCycles == 0)
+    {
+        return false;
+    }
+    begin_step_delta();
+    --memory_latency_.freezeCycles;
+    ++cycle_s_;
+    finalize_step_delta();
+    return true;
+}
+
+bool RV5StageVM_Base::waits_for_late_load(uint32_t instruction) const
+{
+    const optimizer::InstrInfo info = optimizer::decodeInstruction(instruction, 0);
+    for (size_t s = 0; s < info.sourceCount; ++s)
+    {
+        const optimizer::RegRef reg = info.sources[s];
+        const size_t slot = (reg.file == optimizer::RegFile::Fpr ? 32 : 0) + reg.index;
+        if (memory_latency_.readyCycle[slot] > cycle_s_)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RV5StageVM_Base::charge_load_latency(size_t l1MissesBefore, size_t l2MissesBefore)
+{
+    if (!memory_timing_.enabled)
+    {
+        return;
+    }
+
+    // Whichever level's miss counter did not move is the one that served the load.
+    unsigned extra = memory_timing_.l1HitCycles;
+    if (memory_controller_.getL1Cache()->getMissCount() != l1MissesBefore)
+    {
+        extra = memory_controller_.getL2Cache()->getMissCount() != l2MissesBefore
+                    ? memory_timing_.memoryCycles
+                    : memory_timing_.l2HitCycles;
+    }
+    if (extra == 0)
+    {
+        return;
+    }
+
+    if (memory_timing_.nonBlocking && has_hazard_detection())
+    {
+        // The load is in MEM during this cycle. Normally a dependent instruction may leave decode
+        // in this same cycle when there is forwarding (it then takes the value from MEM/WB), and
+        // one cycle later without it (it reads the register file after write-back). The data now
+        // arrives `extra` cycles later than that.
+        const bool fpr = mem_wb_reg_.freg_write;
+        const size_t slot = fpr ? 32 + mem_wb_reg_.frd : mem_wb_reg_.rd;
+
+        // If the instruction right behind, already decoded, overwrites the same register, nothing
+        // will ever read this load's value, so nothing has to wait for it.
+        const optimizer::InstrInfo younger = optimizer::decodeInstruction(id_ex_reg_.instruction, 0);
+        const bool overwritten =
+            younger.dest.isValid() &&
+            (younger.dest.file == optimizer::RegFile::Fpr ? 32 : 0) + younger.dest.index == slot;
+
+        if ((fpr || slot != 0) && !overwritten)
+        {
+            memory_latency_.readyCycle[slot] = cycle_s_ + extra + (has_forwarding() ? 0 : 1);
+        }
+    }
+    else
+    {
+        memory_latency_.freezeCycles += extra;
+    }
+}
+
 void RV5StageVM_Base::Undo()
 {
     if (undo_stack_.empty())
@@ -878,6 +969,7 @@ void RV5StageVM_Base::Undo()
     id_ex_reg_ = last.pipeline_register_change.old_id_ex_reg;
     ex_mem_reg_ = last.pipeline_register_change.old_ex_mem_reg;
     mem_wb_reg_ = last.pipeline_register_change.old_mem_wb_reg;
+    memory_latency_ = last.old_memory_latency;
 
     redo_stack_.push(last);
 
@@ -938,6 +1030,7 @@ void RV5StageVM_Base::Redo()
     id_ex_reg_ = next.pipeline_register_change.new_id_ex_reg;
     ex_mem_reg_ = next.pipeline_register_change.new_ex_mem_reg;
     mem_wb_reg_ = next.pipeline_register_change.new_mem_wb_reg;
+    memory_latency_ = next.new_memory_latency;
 
     undo_stack_.push(next);
 

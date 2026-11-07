@@ -36,6 +36,12 @@ class RV5StageProcessorHNF : public RV5StageVM_Base
     }
     void SetActiveWireNames() override;
 
+  protected:
+    bool has_hazard_detection() const override
+    {
+        return true;
+    }
+
   private:
     // The Hazard Detection Unit instance
     // RV5SHazardUnit hazard_unit_;

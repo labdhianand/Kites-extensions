@@ -146,6 +146,10 @@ void RV5StageProcessorHNF::Reset()
 
 void RV5StageProcessorHNF::Step()
 {
+    if (wait_for_blocking_load())
+    {
+        return;
+    }
     begin_step_delta();
 
     pipeline_writeback();
@@ -162,6 +166,10 @@ void RV5StageProcessorHNF::Step()
     else
     {
         stalls_needed = check_data_hazard(if_id_reg_, id_ex_reg_, ex_mem_reg_, false);
+        if (stalls_needed == 0 && waits_for_late_load(if_id_reg_.instruction))
+        {
+            stalls_needed = 1; // re-checked every cycle until the load arrives
+        }
         if (stalls_needed > 0)
         {
             stall_cycles_ = stalls_needed - 1;
