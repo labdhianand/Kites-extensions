@@ -280,3 +280,103 @@ TEST(OptimizerCostModelValidation, PaddingTheModelsBubblesMakesNoHazardVariantsC
     // Guards the test itself: without the padding the hazards really do corrupt results.
     EXPECT_GT(unpaddedWrongCount, programCount / 2);
 }
+
+// ---------------------------------------------------------------------------
+// Memory latency
+// ---------------------------------------------------------------------------
+TEST(OptimizerCostModel, ALoadsGapGrowsByThePlannedLatencyWhereTheHardwareCanWait)
+{
+    const ProgramModel model = buildProgramModel(assembleSource("add x3, x1, x2\n lw x5, 0(x6)\n"));
+    const InstrInfo &alu = model.instructions[0];
+    const InstrInfo &load = model.instructions[1];
+
+    CostModel forwarding = modelFor(PipelineVariant::H_F);
+    forwarding.loadExtraLatency = 4;
+    EXPECT_EQ(forwarding.minGap(load), 6);
+    EXPECT_EQ(forwarding.minGap(alu), 1);
+    EXPECT_EQ(forwarding.maxGap(), 6);
+
+    CostModel noForwarding = modelFor(PipelineVariant::H_NF);
+    noForwarding.loadExtraLatency = 4;
+    EXPECT_EQ(noForwarding.minGap(load), 7);
+    EXPECT_EQ(noForwarding.minGap(alu), 3);
+
+    // Without hazard detection slow loads block the whole pipeline, which no order can hide.
+    CostModel noHazard = modelFor(PipelineVariant::NH_F);
+    noHazard.loadExtraLatency = 4;
+    EXPECT_EQ(noHazard.minGap(load), 2);
+    EXPECT_EQ(noHazard.maxGap(), 2);
+}
+
+namespace
+{
+MemoryTiming uniformLatency(unsigned extra, bool nonBlocking)
+{
+    MemoryTiming timing;
+    timing.enabled = true;
+    timing.nonBlocking = nonBlocking;
+    timing.l1HitCycles = timing.l2HitCycles = timing.memoryCycles = extra;
+    return timing;
+}
+
+template <typename Vm> unsigned cyclesWithTiming(const AssembledProgram &program, const MemoryTiming &timing)
+{
+    return runOn<Vm>(program, [&](Vm &vm) { vm.memory_timing_ = timing; }).cycles;
+}
+
+size_t loadCount(const ProgramModel &model)
+{
+    size_t count = 0;
+    for (const InstrInfo &info : model.instructions)
+    {
+        count += info.klass == InstrClass::Load ? 1 : 0;
+    }
+    return count;
+}
+
+template <typename Vm>
+void checkLatencyModel(const char *name, PipelineVariant variant, const AssembledProgram &program,
+                       const ProgramModel &model, unsigned fill, unsigned extra)
+{
+    // Non-blocking: only consumers wait, exactly as the timeline predicts with the latency planned.
+    CostModel planned = modelFor(variant);
+    planned.loadExtraLatency = static_cast<int>(extra);
+    const Timeline nonBlocking = estimateTimeline(model, planned, writtenOrder(model));
+    EXPECT_EQ(cyclesWithTiming<Vm>(program, uniformLatency(extra, true)),
+              nonBlocking.slotCount + fill)
+        << name << " non-blocking";
+
+    // Blocking: every load costs its latency whatever the order.
+    const Timeline plain = estimateTimeline(model, modelFor(variant), writtenOrder(model));
+    EXPECT_EQ(cyclesWithTiming<Vm>(program, uniformLatency(extra, false)),
+              plain.slotCount + fill + extra * loadCount(model))
+        << name << " blocking";
+}
+} // namespace
+
+TEST(OptimizerCostModelValidation, TheLatencyModelPredictsMeasuredCycles)
+{
+    setupVmStateDirectory();
+    std::mt19937 rng(23);
+    const size_t programCount =
+        programCountFromEnvironment("KITES_VALIDATE_PROGRAMS", kDefaultValidationPrograms);
+    const unsigned fillHNF = fillAndDrainCycles([](const AssembledProgram &p)
+                                                { return runOn<RV5StageProcessorHNF>(p).cycles; });
+    const unsigned fillHF = fillAndDrainCycles([](const AssembledProgram &p)
+                                               { return runOn<RV5StageProcessorHF>(p).cycles; });
+
+    for (size_t i = 0; i < programCount; ++i)
+    {
+        const std::string source = randomProgram(rng, 16, /*includeFloatingPoint=*/false);
+        SCOPED_TRACE("program " + std::to_string(i) + ":\n" + source);
+        const AssembledProgram program = assembleSource(source);
+        const ProgramModel model = buildProgramModel(program);
+        for (unsigned extra : {1u, 4u})
+        {
+            checkLatencyModel<RV5StageProcessorHNF>("H_NF", PipelineVariant::H_NF, program, model,
+                                                    fillHNF, extra);
+            checkLatencyModel<RV5StageProcessorHF>("H_F", PipelineVariant::H_F, program, model,
+                                                   fillHF, extra);
+        }
+    }
+}

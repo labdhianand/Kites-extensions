@@ -116,6 +116,7 @@ OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions
 
     CostModel costModel;
     costModel.variant = options.variant;
+    costModel.loadExtraLatency = options.loadExtraLatency;
     const bool insertPadding = !costModel.detectsHazards();
 
     const SourceText text = splitSource(source);
