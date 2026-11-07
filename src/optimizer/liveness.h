@@ -21,6 +21,25 @@ namespace optimizer
 /// One bit per register: 32 GPRs followed by 32 FPRs (the same numbering as elsewhere).
 using RegisterSet = std::bitset<64>;
 
+/**
+ * @brief How control moves between the basic blocks.
+ *
+ * Successors are the fall-through block and statically known branch/jump targets. A call (`jal`
+ * that writes a link register) also continues at the next block when the callee returns. A jump
+ * through a register (`jalr`, including `ret`) has unknown successors. A block can be entered from
+ * somewhere unknown if it is a return point (it follows a call), and every block can be if the
+ * program computes a code address with `auipc`.
+ */
+struct ControlFlow
+{
+    std::vector<std::vector<size_t>> successors;
+    std::vector<std::vector<size_t>> predecessors;
+    std::vector<bool> hasUnknownSuccessors;
+    std::vector<bool> hasUnknownPredecessors;
+};
+
+[[nodiscard]] ControlFlow computeControlFlow(const ProgramModel &model);
+
 struct BlockLiveness
 {
     RegisterSet liveIn;  ///< read by the block, or after it, before being written
