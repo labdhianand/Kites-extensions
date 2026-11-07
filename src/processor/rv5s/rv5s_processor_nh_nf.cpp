@@ -166,6 +166,10 @@ void RV5StageProcessorNHNF::Reset()
 
 void RV5StageProcessorNHNF::Step()
 {
+    if (wait_for_blocking_load())
+    {
+        return;
+    }
     begin_step_delta();
 
     pipeline_writeback();

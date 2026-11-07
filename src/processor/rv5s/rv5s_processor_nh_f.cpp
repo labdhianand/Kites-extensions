@@ -172,6 +172,10 @@ void RV5StageProcessorNHF::Reset()
 
 void RV5StageProcessorNHF::Step()
 {
+    if (wait_for_blocking_load())
+    {
+        return;
+    }
     begin_step_delta();
 
     // 1. Execute stages (WB -> MEM -> EX -> ID -> IF)

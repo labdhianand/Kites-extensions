@@ -40,6 +40,12 @@ class RV5StageProcessorNHF : public RV5StageVM_Base
     }
     void SetActiveWireNames() override;
 
+  protected:
+    bool has_forwarding() const override
+    {
+        return true;
+    }
+
   private:
     // --- Private methods for each pipeline stage ---
     void pipeline_fetch() override;

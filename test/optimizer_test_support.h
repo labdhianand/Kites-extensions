@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -54,11 +55,18 @@ class QuietOutput
     std::streambuf *m_previous;
 };
 
-// Runs a program to completion on a fresh processor of type Vm.
-template <typename Vm> RunResult runOn(const Kites::AssembledProgram &program)
+// Runs a program to completion on a fresh processor of type Vm. `configure`, if given, is applied
+// to the processor before the program is loaded (to set the memory timing or the caches).
+template <typename Vm>
+RunResult runOn(const Kites::AssembledProgram &program,
+                const std::function<void(Vm &)> &configure = nullptr)
 {
     QuietOutput quiet;
     Vm vm;
+    if (configure)
+    {
+        configure(vm);
+    }
     vm.LoadProgram(program);
     vm.DebugRun();
 

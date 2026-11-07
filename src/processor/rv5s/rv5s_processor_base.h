@@ -4,8 +4,24 @@
 #include "processor/processor_manager.h"
 #include "rv5s_control_unit.h"
 
+#include <array>
+
 namespace Kites
 {
+/// The memory-latency state of the pipeline (see memory_timing.h), saved with every step so that
+/// undo and redo restore it exactly.
+struct MemoryLatencyState
+{
+    /// Cycles the whole pipeline still has to wait for a blocking load.
+    unsigned freezeCycles{0};
+
+    /// For non-blocking loads: the first cycle in which an instruction reading each register may
+    /// leave decode (32 GPRs then 32 FPRs). 0 means the register is not waiting on a load.
+    std::array<uint64_t, 64> readyCycle{};
+
+    bool operator==(const MemoryLatencyState &other) const = default;
+};
+
 struct PipelineRegisterChange
 {
     IF_ID_Register old_if_id_reg;
@@ -24,6 +40,8 @@ struct PipelineRegisterChange
 struct RV5StageStepDelta : public StepDelta
 {
     PipelineRegisterChange pipeline_register_change;
+    MemoryLatencyState old_memory_latency;
+    MemoryLatencyState new_memory_latency;
 };
 
 class RV5StageVM_Base : public ProcessorBase
@@ -59,6 +77,30 @@ class RV5StageVM_Base : public ProcessorBase
 
     // Set when EX/MEM redirected the PC this cycle; consumed by fetch_and_advance_pc().
     bool pc_redirected_ = false;
+
+    MemoryLatencyState memory_latency_;
+
+    // What this pipeline variant has, which decides how a slow load is waited for.
+    virtual bool has_hazard_detection() const
+    {
+        return false;
+    }
+    virtual bool has_forwarding() const
+    {
+        return false;
+    }
+
+    // If a blocking load is still being waited for, spends this whole cycle waiting and returns
+    // true. Every Step() calls this first.
+    bool wait_for_blocking_load();
+
+    // True if `instruction` reads a register whose non-blocking load has not arrived yet, so it
+    // has to stay in decode this cycle. Only variants with hazard detection call this.
+    bool waits_for_late_load(uint32_t instruction) const;
+
+    // Charges the extra latency of the load that just accessed memory in MEM, given the miss
+    // counters of L1 and L2 from before the access.
+    void charge_load_latency(size_t l1MissesBefore, size_t l2MissesBefore);
 
     void memory_writeback();
     void memory_writeback_float();
