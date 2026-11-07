@@ -173,6 +173,79 @@ TEST(OptimizerDependencyGraph, AbsoluteAddressesThroughZeroRegisterCanBeCompared
     EXPECT_TRUE(hasEdge(same.graph, 0, 1, DependencyKind::MemoryRaw));
 }
 
+namespace
+{
+bool hasMemoryEdge(const DependencyGraph &graph, size_t from, size_t to)
+{
+    return hasEdge(graph, from, to, DependencyKind::MemoryRaw) ||
+           hasEdge(graph, from, to, DependencyKind::MemoryWar) ||
+           hasEdge(graph, from, to, DependencyKind::MemoryWaw);
+}
+} // namespace
+
+TEST(OptimizerDependencyGraph, AccessesThroughADerivedBaseRegisterAreComparedSymbolically)
+{
+    // x25 = x15 + 4: the store covers x15+0..3 and the load x15+4..7, so they never overlap.
+    const Analysis apart = analyse("sw x1, 0(x15)\n addi x25, x15, 4\n lw x2, 0(x25)\n");
+    EXPECT_FALSE(hasMemoryEdge(apart.graph, 0, 2));
+
+    // Here the load reads exactly the stored word.
+    const Analysis same = analyse("sw x1, 4(x15)\n addi x25, x15, 4\n lw x2, 0(x25)\n");
+    EXPECT_TRUE(hasEdge(same.graph, 0, 2, DependencyKind::MemoryRaw));
+}
+
+TEST(OptimizerDependencyGraph, CopiesOfAnUnrolledLoopBodyDoNotAliasInMemory)
+{
+    // Two copies of a vector-add body, for elements i and i+1, each computing its own address.
+    const Analysis a = analyse(R"(
+        slli x14, x12, 2
+        add  x15, x10, x14
+        lw   x18, 0(x15)
+        lw   x19, 32(x15)
+        add  x20, x18, x19
+        sw   x20, 64(x15)
+        addi x12, x12, 1
+        slli x24, x12, 2
+        add  x25, x10, x24
+        lw   x26, 0(x25)
+        lw   x27, 32(x25)
+        add  x28, x26, x27
+        sw   x28, 64(x25)
+    )");
+    // c[i] (unit 5) against a[i+1], b[i+1] and c[i+1] (units 9, 10, 12): all different words.
+    EXPECT_FALSE(hasMemoryEdge(a.graph, 5, 9));
+    EXPECT_FALSE(hasMemoryEdge(a.graph, 5, 10));
+    EXPECT_FALSE(hasMemoryEdge(a.graph, 5, 12));
+}
+
+TEST(OptimizerDependencyGraph, ConstantAddressesBuiltWithLuiAreCompared)
+{
+    const Analysis apart = analyse("lui x5, 2\n lui x6, 2\n sw x1, 0(x5)\n lw x2, 4(x6)\n");
+    EXPECT_FALSE(hasMemoryEdge(apart.graph, 2, 3));
+
+    const Analysis same = analyse("lui x5, 2\n lui x6, 2\n sw x1, 0(x5)\n lw x2, 0(x6)\n");
+    EXPECT_TRUE(hasEdge(same.graph, 2, 3, DependencyKind::MemoryRaw));
+}
+
+TEST(OptimizerDependencyGraph, APointerLoadedFromMemoryIsComparedOnlyWithItself)
+{
+    // Both accesses go through the same loaded pointer, 4 bytes apart.
+    const Analysis samePointer = analyse("lw x5, 0(x6)\n sw x1, 0(x5)\n lw x2, 4(x5)\n");
+    EXPECT_FALSE(hasMemoryEdge(samePointer.graph, 1, 2));
+
+    // Two different loaded pointers could point anywhere, including at each other's target.
+    const Analysis twoPointers =
+        analyse("lw x5, 0(x6)\n lw x7, 0(x8)\n sw x1, 0(x5)\n lw x2, 4(x7)\n");
+    EXPECT_TRUE(hasEdge(twoPointers.graph, 2, 3, DependencyKind::MemoryRaw));
+}
+
+TEST(OptimizerDependencyGraph, ArithmeticTheAnalysisCannotFollowIsNotTrustedForAddresses)
+{
+    // x15 ^ 4 is x15 + 4 or x15 - 4 depending on bit 2 of x15, so nothing is known.
+    const Analysis a = analyse("sw x1, 0(x15)\n xori x25, x15, 4\n lw x2, 0(x25)\n");
+    EXPECT_TRUE(hasEdge(a.graph, 0, 2, DependencyKind::MemoryRaw));
+}
+
 TEST(OptimizerDependencyGraph, FloatingPointLoadsAndStoresFollowTheSameRules)
 {
     const Analysis a = analyse("fsw f1, 0(x2)\n flw f3, 0(x2)\n");

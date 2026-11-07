@@ -59,9 +59,10 @@ struct DependencyGraph
  * @brief Builds the dependency graph of one basic block.
  *
  * Register dependencies are tracked per register file, so x5 and f5 are independent, and x0 never
- * creates a dependency. Two memory accesses are only treated as independent when they use the same
- * base register (unchanged between the accesses) and their byte ranges cannot overlap; anything
- * else is assumed to alias. Units that must not move (barriers, units that read their own
+ * creates a dependency. Two memory accesses are only treated as independent when their addresses
+ * provably differ: the base registers are followed symbolically through the block (see
+ * symbolic_value.h), and if the two addresses differ by a known constant that keeps their byte
+ * ranges apart, they cannot alias. Anything else is assumed to alias. Units that must not move (barriers, units that read their own
  * address, and every unit of a non-reorderable block) are fences. The block's terminator stays
  * last.
  */
