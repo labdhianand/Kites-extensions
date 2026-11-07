@@ -1,8 +1,10 @@
 /**
  * @file liveness.cpp
- * @brief Implementation of the block-level liveness analysis.
+ * @brief Implementation of the block-level control flow and liveness analysis.
  */
 #include "optimizer/liveness.h"
+
+#include <algorithm>
 
 namespace Kites
 {
@@ -43,16 +45,21 @@ UseDef useDefOf(const ProgramModel &model, const BasicBlock &block)
     }
     return result;
 }
+
+const InstrInfo &lastInstructionOf(const ProgramModel &model, const BasicBlock &block)
+{
+    return model.instructions[block.firstInstruction + block.instructionCount - 1];
+}
 } // namespace
 
-std::vector<BlockLiveness> computeLiveness(const ProgramModel &model)
+ControlFlow computeControlFlow(const ProgramModel &model)
 {
     const size_t blockCount = model.blocks.size();
-    std::vector<BlockLiveness> liveness(blockCount);
-    if (blockCount == 0)
-    {
-        return liveness;
-    }
+    ControlFlow flow;
+    flow.successors.resize(blockCount);
+    flow.predecessors.resize(blockCount);
+    flow.hasUnknownSuccessors.assign(blockCount, false);
+    flow.hasUnknownPredecessors.assign(blockCount, false);
 
     std::vector<size_t> blockOfInstruction(model.instructions.size(), 0);
     for (size_t b = 0; b < blockCount; ++b)
@@ -64,23 +71,39 @@ std::vector<BlockLiveness> computeLiveness(const ProgramModel &model)
         }
     }
 
-    std::vector<UseDef> useDef;
-    std::vector<std::vector<size_t>> successors(blockCount);
-    std::vector<bool> successorsUnknown(blockCount, false);
+    // `la` of a data label also uses auipc, but its target is far from the code (data starts at
+    // 0x10000000). Only an auipc that lands near the code can produce a jump target; the 4 KiB
+    // margin covers the low 12 bits added by the following instruction.
+    const int64_t codeBytes = static_cast<int64_t>(model.instructions.size()) * 4;
+    bool computesCodeAddresses = false;
+    for (const InstrInfo &info : model.instructions)
+    {
+        if (info.readsPc)
+        {
+            const int64_t target = static_cast<int64_t>(info.pc) + info.imm;
+            computesCodeAddresses =
+                computesCodeAddresses || (target > -4096 && target < codeBytes + 4096);
+        }
+    }
+
     for (size_t b = 0; b < blockCount; ++b)
     {
-        const BasicBlock &block = model.blocks[b];
-        useDef.push_back(useDefOf(model, block));
-
-        const InstrInfo &last =
-            model.instructions[block.firstInstruction + block.instructionCount - 1];
+        const InstrInfo &last = lastInstructionOf(model, model.blocks[b]);
         const bool hasNext = b + 1 < blockCount;
+        auto addSuccessor = [&](size_t successor)
+        {
+            if (std::find(flow.successors[b].begin(), flow.successors[b].end(), successor) ==
+                flow.successors[b].end())
+            {
+                flow.successors[b].push_back(successor);
+            }
+        };
         auto addTarget = [&]()
         {
             if (last.hasTarget && last.targetPc % 4 == 0 &&
                 last.targetPc / 4 < model.instructions.size())
             {
-                successors[b].push_back(blockOfInstruction[last.targetPc / 4]);
+                addSuccessor(blockOfInstruction[last.targetPc / 4]);
             }
         };
 
@@ -90,28 +113,63 @@ std::vector<BlockLiveness> computeLiveness(const ProgramModel &model)
             addTarget();
             if (hasNext)
             {
-                successors[b].push_back(b + 1);
+                addSuccessor(b + 1);
             }
             break;
         case InstrClass::Jal:
             addTarget();
             // A call (it writes a link register) continues at the next block once the callee
-            // returns; a plain jump does not.
+            // returns; a plain jump does not. The return itself is an unknown jump, so the
+            // next block is also entered from somewhere unknown.
             if (last.dest.isValid() && hasNext)
             {
-                successors[b].push_back(b + 1);
+                addSuccessor(b + 1);
+                flow.hasUnknownPredecessors[b + 1] = true;
             }
             break;
         case InstrClass::Jalr:
-            successorsUnknown[b] = true;
+            flow.hasUnknownSuccessors[b] = true;
             break;
         default:
             if (hasNext)
             {
-                successors[b].push_back(b + 1);
+                addSuccessor(b + 1);
             }
             break;
         }
+    }
+
+    for (size_t b = 0; b < blockCount; ++b)
+    {
+        for (size_t successor : flow.successors[b])
+        {
+            flow.predecessors[successor].push_back(b);
+        }
+    }
+
+    // With auipc a program can compute a code address and jump there, so any block may be entered
+    // from somewhere unknown.
+    if (computesCodeAddresses)
+    {
+        flow.hasUnknownPredecessors.assign(blockCount, true);
+    }
+    return flow;
+}
+
+std::vector<BlockLiveness> computeLiveness(const ProgramModel &model)
+{
+    const size_t blockCount = model.blocks.size();
+    std::vector<BlockLiveness> liveness(blockCount);
+    if (blockCount == 0)
+    {
+        return liveness;
+    }
+
+    const ControlFlow flow = computeControlFlow(model);
+    std::vector<UseDef> useDef;
+    for (const BasicBlock &block : model.blocks)
+    {
+        useDef.push_back(useDefOf(model, block));
     }
 
     // Standard backward dataflow, repeated until nothing changes.
@@ -122,11 +180,11 @@ std::vector<BlockLiveness> computeLiveness(const ProgramModel &model)
         for (size_t b = blockCount; b-- > 0;)
         {
             RegisterSet liveOut;
-            if (successorsUnknown[b])
+            if (flow.hasUnknownSuccessors[b])
             {
                 liveOut.set();
             }
-            for (size_t successor : successors[b])
+            for (size_t successor : flow.successors[b])
             {
                 liveOut |= liveness[successor].liveIn;
             }
