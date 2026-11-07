@@ -5,6 +5,7 @@
 #include "optimizer/scheduler.h"
 
 #include <algorithm>
+#include <array>
 
 #include "optimizer/dependency_graph.h"
 #include "optimizer/timeline.h"
@@ -15,6 +16,13 @@ namespace optimizer
 {
 namespace
 {
+constexpr size_t kRegisterSlotCount = 64; // 32 GPRs followed by 32 FPRs
+
+size_t registerSlot(RegRef reg)
+{
+    return (reg.file == RegFile::Fpr ? 32 : 0) + reg.index;
+}
+
 // A unit that does nothing at all: no registers read or written, no memory access, no control flow.
 // This is `addi x0, x0, 0` and its relatives, i.e. padding.
 bool isNopUnit(const ProgramModel &model, const Unit &unit)
@@ -109,61 +117,105 @@ std::vector<int> chainLengths(const ProgramModel &model, const BasicBlock &block
     return length;
 }
 
-BlockSchedule keepOriginal(const std::vector<size_t> &identity, const Timeline &original,
-                           const ProgramModel &model, const BasicBlock &block, std::string reason)
+// What a block looks like from the outside: how close each register's last write is to the end
+// of the block, and how soon each register the block reads from before it is first read. The
+// neighbouring blocks' producers and consumers are unknown, so these distances are what protects
+// them.
+struct BoundaryProfile
 {
-    BlockSchedule schedule;
-    schedule.unitOrder = identity;
-    schedule.bubblesBefore = bubblesBeforeUnits(model, block, identity, original);
-    schedule.originalSlots = schedule.scheduledSlots = original.slotCount;
-    schedule.originalBubbles = schedule.scheduledBubbles = original.bubbleCount;
-    schedule.reason = std::move(reason);
-    return schedule;
-}
-} // namespace
+    std::array<int, kRegisterSlotCount> exitDistance{}; ///< -1 if the block never writes it
+    std::array<int, kRegisterSlotCount> firstReadSlot{}; ///< -1 if the block never reads it live-in
 
-BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
-                            const CostModel &costModel, const ScheduleOptions &options)
+    BoundaryProfile()
+    {
+        exitDistance.fill(-1);
+        firstReadSlot.fill(-1);
+    }
+};
+
+BoundaryProfile boundaryProfileOf(const ProgramModel &model,
+                                  const std::vector<size_t> &instructions,
+                                  const Timeline &timeline)
 {
-    std::vector<size_t> identity(block.unitCount);
-    for (size_t i = 0; i < identity.size(); ++i)
-    {
-        identity[i] = i;
-    }
-    const Timeline original = estimateTimeline(model, costModel, flatten(model, block, identity));
+    BoundaryProfile profile;
+    std::array<int, kRegisterSlotCount> lastWriteSlot{};
+    lastWriteSlot.fill(-1);
 
-    if (!block.isReorderable)
+    for (size_t position = 0; position < instructions.size(); ++position)
     {
-        return keepOriginal(identity, original, model, block,
-                            "the block can be entered in the middle of a pseudo-instruction");
-    }
-    for (size_t node = 0; node < block.unitCount; ++node)
-    {
-        if (usesFloatingPoint(model, model.units[block.firstUnit + node]))
+        const InstrInfo &info = model.instructions[instructions[position]];
+        const int slot = timeline.issueSlot[position];
+        for (size_t s = 0; s < info.sourceCount; ++s)
         {
-            return keepOriginal(identity, original, model, block,
-                                "floating-point instructions are not supported on the pipelined "
-                                "processor models");
+            const size_t reg = registerSlot(info.sources[s]);
+            if (lastWriteSlot[reg] < 0 && profile.firstReadSlot[reg] < 0)
+            {
+                profile.firstReadSlot[reg] = slot;
+            }
+        }
+        if (info.dest.isValid())
+        {
+            lastWriteSlot[registerSlot(info.dest)] = slot;
         }
     }
-    if (block.unitCount < 2)
+
+    for (size_t reg = 0; reg < kRegisterSlotCount; ++reg)
     {
-        return keepOriginal(identity, original, model, block, "");
+        if (lastWriteSlot[reg] >= 0)
+        {
+            profile.exitDistance[reg] = timeline.slotCount - 1 - lastWriteSlot[reg];
+        }
     }
+    return profile;
+}
 
-    const DependencyGraph graph = buildDependencyGraph(model, block);
-    const std::vector<int> chain = chainLengths(model, block, graph, costModel);
+// A producer in a neighbouring block and a consumer here are `exit + 1 + slot` slots apart, and
+// anything at least `maxGap` apart is safe. So it is enough that each distance either stays at
+// least as large as before or is already `maxGap - 1`, the point from which the other side cannot
+// matter. Only needed where the hardware does not stall for the consumer. A register that nothing
+// after the block reads needs no protection on the way out.
+bool preservesBoundary(const BoundaryProfile &before, const BoundaryProfile &after, int maxGap,
+                       const RegisterSet &liveOut)
+{
+    const int safe = maxGap - 1;
+    for (size_t reg = 0; reg < kRegisterSlotCount; ++reg)
+    {
+        if (liveOut[reg] && before.exitDistance[reg] >= 0 &&
+            after.exitDistance[reg] < std::min(before.exitDistance[reg], safe))
+        {
+            return false;
+        }
+        if (before.firstReadSlot[reg] >= 0 &&
+            after.firstReadSlot[reg] < std::min(before.firstReadSlot[reg], safe))
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
-    std::vector<bool> dropped(block.unitCount, false);
+struct Attempt
+{
+    std::vector<size_t> order;
     std::vector<size_t> droppedUnits;
-    if (options.dropNops)
+    Timeline timeline;
+};
+
+// Greedy list scheduling of the block. Dropped units (NOP padding) are left out entirely.
+Attempt listSchedule(const ProgramModel &model, const BasicBlock &block,
+                     const DependencyGraph &graph, const std::vector<int> &chain,
+                     const CostModel &costModel, bool dropNops)
+{
+    Attempt attempt;
+    std::vector<bool> dropped(block.unitCount, false);
+    if (dropNops)
     {
         for (size_t node = 0; node < block.unitCount; ++node)
         {
             if (isNopUnit(model, model.units[block.firstUnit + node]))
             {
                 dropped[node] = true;
-                droppedUnits.push_back(node);
+                attempt.droppedUnits.push_back(node);
             }
         }
     }
@@ -188,7 +240,6 @@ BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
     }
 
     TimelineBuilder state(costModel);
-    std::vector<size_t> order;
     while (!ready.empty())
     {
         size_t bestIndex = 0;
@@ -222,7 +273,7 @@ BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
 
         const size_t node = ready[bestIndex];
         ready.erase(ready.begin() + static_cast<std::ptrdiff_t>(bestIndex));
-        order.push_back(node);
+        attempt.order.push_back(node);
 
         const Unit &unit = model.units[block.firstUnit + node];
         for (size_t k = unit.firstInstruction; k < unit.firstInstruction + unit.instructionCount;
@@ -240,22 +291,111 @@ BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
         }
     }
 
-    const Timeline scheduled = estimateTimeline(model, costModel, flatten(model, block, order));
-    if (scheduled.slotCount >= original.slotCount)
+    attempt.timeline = estimateTimeline(model, costModel, flatten(model, block, attempt.order));
+    return attempt;
+}
+
+BlockSchedule keepOriginal(const std::vector<size_t> &identity, const Timeline &original,
+                           const ProgramModel &model, const BasicBlock &block, std::string reason)
+{
+    BlockSchedule schedule;
+    schedule.unitOrder = identity;
+    schedule.bubblesBefore = bubblesBeforeUnits(model, block, identity, original);
+    schedule.originalSlots = schedule.scheduledSlots = original.slotCount;
+    schedule.originalBubbles = schedule.scheduledBubbles = original.bubbleCount;
+    schedule.reason = std::move(reason);
+    return schedule;
+}
+} // namespace
+
+BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
+                            const CostModel &costModel, const ScheduleOptions &options)
+{
+    std::vector<size_t> identity(block.unitCount);
+    for (size_t i = 0; i < identity.size(); ++i)
+    {
+        identity[i] = i;
+    }
+    const std::vector<size_t> originalInstructions = flatten(model, block, identity);
+    const Timeline original = estimateTimeline(model, costModel, originalInstructions);
+
+    if (!block.isReorderable)
+    {
+        return keepOriginal(identity, original, model, block,
+                            "the block can be entered in the middle of a pseudo-instruction");
+    }
+    for (size_t node = 0; node < block.unitCount; ++node)
+    {
+        if (usesFloatingPoint(model, model.units[block.firstUnit + node]))
+        {
+            return keepOriginal(identity, original, model, block,
+                                "floating-point instructions are not supported on the pipelined "
+                                "processor models");
+        }
+    }
+    if (block.unitCount < 2)
     {
         return keepOriginal(identity, original, model, block, "");
     }
 
-    BlockSchedule schedule;
-    schedule.unitOrder = order;
-    schedule.droppedUnits = droppedUnits;
-    schedule.bubblesBefore = bubblesBeforeUnits(model, block, order, scheduled);
-    schedule.originalSlots = original.slotCount;
-    schedule.scheduledSlots = scheduled.slotCount;
-    schedule.originalBubbles = original.bubbleCount;
-    schedule.scheduledBubbles = scheduled.bubbleCount;
-    schedule.changed = true;
-    return schedule;
+    const DependencyGraph graph = buildDependencyGraph(model, block);
+    const std::vector<int> chain = chainLengths(model, block, graph, costModel);
+    const BoundaryProfile originalBoundary =
+        boundaryProfileOf(model, originalInstructions, original);
+
+    // Try what was asked for first. If that would disturb the neighbouring blocks, fall back to
+    // keeping the NOPs, which are then just ordinary fillers.
+    std::vector<bool> attempts = {options.dropNops};
+    if (options.dropNops)
+    {
+        attempts.push_back(false);
+    }
+
+    bool refusedForBoundary = false;
+    for (bool dropNops : attempts)
+    {
+        const Attempt attempt = listSchedule(model, block, graph, chain, costModel, dropNops);
+        if (attempt.timeline.slotCount >= original.slotCount)
+        {
+            continue;
+        }
+
+        // A hazard-detecting variant stalls for a neighbour's producer or consumer anyway; the
+        // others silently compute a wrong value, so the block must look the same from outside.
+        if (!costModel.detectsHazards())
+        {
+            const BoundaryProfile boundary = boundaryProfileOf(
+                model, flatten(model, block, attempt.order), attempt.timeline);
+            RegisterSet liveOut;
+            liveOut.set(); // unknown successors: assume everything is read
+            if (options.liveOut)
+            {
+                liveOut = *options.liveOut;
+            }
+            if (!preservesBoundary(originalBoundary, boundary, costModel.maxGap(), liveOut))
+            {
+                refusedForBoundary = true;
+                continue;
+            }
+        }
+
+        BlockSchedule schedule;
+        schedule.unitOrder = attempt.order;
+        schedule.droppedUnits = attempt.droppedUnits;
+        schedule.bubblesBefore = bubblesBeforeUnits(model, block, attempt.order, attempt.timeline);
+        schedule.originalSlots = original.slotCount;
+        schedule.scheduledSlots = attempt.timeline.slotCount;
+        schedule.originalBubbles = original.bubbleCount;
+        schedule.scheduledBubbles = attempt.timeline.bubbleCount;
+        schedule.changed = true;
+        return schedule;
+    }
+
+    return keepOriginal(identity, original, model, block,
+                        refusedForBoundary ? "a better order would change how close this block's "
+                                             "values are to the neighbouring blocks, which the "
+                                             "hardware does not protect"
+                                           : "");
 }
 
 } // namespace optimizer
