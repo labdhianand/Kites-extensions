@@ -133,6 +133,12 @@ install(TARGETS kites_cli
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# Benchmark runner for the reordering optimizer (writes docs/BENCHMARKS.md).
+add_executable(kites_bench bench/main.cpp)
+set_target_properties(kites_bench PROPERTIES OUTPUT_NAME "kites-bench")
+target_link_libraries(kites_bench PRIVATE kites_core)
+target_compile_definitions(kites_bench PRIVATE DISABLE_GUI)
+
 
 if(ENABLE_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
