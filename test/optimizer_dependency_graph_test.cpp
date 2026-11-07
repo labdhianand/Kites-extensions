@@ -158,8 +158,9 @@ TEST(OptimizerDependencyGraph, DifferentBaseRegistersAreAssumedToAlias)
 
 TEST(OptimizerDependencyGraph, ChangedBaseRegisterDefeatsTheDisjointnessProof)
 {
-    // Same register and offsets that look different, but x2 changes in between.
-    const Analysis a = analyse("sw x1, 0(x2)\n addi x2, x2, 8\n lw x3, 0(x2)\n");
+    // Same base register and offsets (4..8 and 0..4) that look disjoint, but x2 moves by 4 in
+    // between, so both accesses really touch the same bytes.
+    const Analysis a = analyse("sw x1, 4(x2)\n addi x2, x2, 4\n lw x3, 0(x2)\n");
     EXPECT_TRUE(hasEdge(a.graph, 0, 2, DependencyKind::MemoryRaw));
 }
 
