@@ -5,7 +5,6 @@
 #include "optimizer/optimizer.h"
 
 #include <map>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
 
@@ -13,6 +12,7 @@
 #include "optimizer/liveness.h"
 #include "optimizer/program_model.h"
 #include "optimizer/scheduler.h"
+#include "optimizer/source_text.h"
 
 namespace Kites
 {
@@ -20,91 +20,6 @@ namespace optimizer
 {
 namespace
 {
-// The program text as lines, remembering how to put it back together exactly.
-struct SourceText
-{
-    std::vector<std::string> lines;
-    std::string newline{"\n"};
-    bool endsWithNewline{false};
-};
-
-SourceText splitSource(const std::string &text)
-{
-    SourceText result;
-    result.newline = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
-    result.endsWithNewline = !text.empty() && text.back() == '\n';
-
-    size_t start = 0;
-    while (start < text.size())
-    {
-        const size_t end = text.find('\n', start);
-        std::string line = text.substr(start, end == std::string::npos ? end : end - start);
-        if (!line.empty() && line.back() == '\r')
-        {
-            line.pop_back();
-        }
-        result.lines.push_back(std::move(line));
-        if (end == std::string::npos)
-        {
-            break;
-        }
-        start = end + 1;
-    }
-    return result;
-}
-
-std::string joinSource(const SourceText &text)
-{
-    std::string joined;
-    for (size_t i = 0; i < text.lines.size(); ++i)
-    {
-        if (i > 0)
-        {
-            joined += text.newline;
-        }
-        joined += text.lines[i];
-    }
-    if (text.endsWithNewline && !text.lines.empty())
-    {
-        joined += text.newline;
-    }
-    return joined;
-}
-
-// A source line split into what must stay at its position (indentation and any labels) and the
-// instruction with its trailing comment, which is what moves.
-struct SplitLine
-{
-    std::string prefix;
-    std::string body;
-};
-
-SplitLine splitLine(const std::string &line)
-{
-    static const std::regex prefixPattern(R"(^\s*(?:[A-Za-z_.$][A-Za-z0-9_.$]*\s*:\s*)*)");
-    std::smatch match;
-    std::regex_search(line, match, prefixPattern);
-    const std::string prefix = match.str(0);
-    return {prefix, line.substr(prefix.size())};
-}
-
-std::string leadingWhitespace(const std::string &prefix)
-{
-    return prefix.substr(0, prefix.find_first_not_of(" \t"));
-}
-
-bool hasLabel(const std::string &prefix)
-{
-    return prefix.find_first_not_of(" \t") != std::string::npos;
-}
-
-std::string rightTrimmed(std::string text)
-{
-    const size_t end = text.find_last_not_of(" \t");
-    text.erase(end == std::string::npos ? 0 : end + 1);
-    return text;
-}
-
 constexpr const char *kPaddingLine = "addi x0, x0, 0  # padding";
 
 // What replaces each instruction line of a changed block. Lines map to zero, one or several
@@ -167,8 +82,22 @@ void checkAssembles(const std::string &source, const char *what)
 }
 } // namespace
 
-OptimizeResult optimizeSource(const std::string &source, const OptimizeOptions &options)
+OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions &options)
 {
+    OptimizeResult result;
+
+    // Unrolling happens first, so the scheduler sees the longer loop bodies.
+    std::string source = original;
+    if (options.unrollFactor > 1)
+    {
+        UnrollOptions unrollOptions;
+        unrollOptions.maxFactor = options.unrollFactor;
+        UnrollResult unrolled = unrollLoops(original, unrollOptions);
+        source = std::move(unrolled.source);
+        result.loops = std::move(unrolled.loops);
+        result.changed = unrolled.changed;
+    }
+
     std::istringstream stream(source);
     const AssembledProgram program = [&]
     {
@@ -192,7 +121,7 @@ OptimizeResult optimizeSource(const std::string &source, const OptimizeOptions &
     const SourceText text = splitSource(source);
     std::map<unsigned, std::vector<std::string>> replacements;
 
-    OptimizeResult result;
+    bool rescheduled = false;
     for (size_t b = 0; b < model.blocks.size(); ++b)
     {
         const BasicBlock &block = model.blocks[b];
@@ -216,15 +145,16 @@ OptimizeResult optimizeSource(const std::string &source, const OptimizeOptions &
         if (schedule.changed)
         {
             rewriteBlock(text, model, block, schedule, insertPadding, replacements);
-            result.changed = true;
+            rescheduled = true;
         }
     }
 
-    if (!result.changed)
+    if (!rescheduled)
     {
         result.source = source;
         return result;
     }
+    result.changed = true;
 
     SourceText rewritten;
     rewritten.newline = text.newline;
