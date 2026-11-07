@@ -11,6 +11,8 @@
 #include <iostream>
 
 
+#include "common/instructions.h"
+#include "optimizer/instr_info.h"
 #include "processor/pipeline_registers.h"
 
 namespace Kites
@@ -39,6 +41,30 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
     uint8_t if_id_rs1 = (instruction >> 15) & 0x1F;
     uint8_t if_id_rs2 = (instruction >> 20) & 0x1F;
 
+    // Integer instructions read only the registers they really encode. In the I, S, U and J
+    // formats the bits at the rs1/rs2 positions are part of an immediate, so comparing them with
+    // register numbers reports hazards that do not exist (for example `lw x8, 8(x10)` right after
+    // a write to x8). Floating-point instructions keep the original field-based check.
+    const bool is_float_consumer = instruction_set::isFInstruction(instruction) ||
+                                   instruction_set::isDInstruction(instruction);
+    const optimizer::InstrInfo consumer_info = optimizer::decodeInstruction(instruction, 0);
+    auto consumer_reads_gpr = [&](uint8_t reg)
+    {
+        if (is_float_consumer)
+        {
+            return reg == if_id_rs1 || reg == if_id_rs2;
+        }
+        for (size_t i = 0; i < consumer_info.sourceCount; ++i)
+        {
+            if (consumer_info.sources[i].file == optimizer::RegFile::Gpr &&
+                consumer_info.sources[i].index == reg)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // FPR Source Registers (frs1/frs2/frs3 fields)
     // Note: F-type instructions reuse the rs1/rs2 bit-fields for frs1/frs2
     uint8_t if_id_frs1 = (instruction >> 15) & 0x1F;
@@ -47,14 +73,13 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
 
     // --- 2. Check for GPR Hazard (Source writes GPR, Dependent reads GPR) ---
     // Two-cycle hazard: current EX/MEM instruction writes a GPR the IF/ID instruction reads
-    bool gpr_hazard_two_cycle = (ex_mem_reg.reg_write && (ex_mem_reg.rd != 0)) &&
-                                (ex_mem_reg.rd == if_id_rs1 || ex_mem_reg.rd == if_id_rs2);
+    bool gpr_hazard_two_cycle =
+        (ex_mem_reg.reg_write && (ex_mem_reg.rd != 0)) && consumer_reads_gpr(ex_mem_reg.rd);
 
     // One-cycle hazard: previous EX/MEM instruction (now further down) writes a GPR the IF/ID
     // instruction reads
-    bool gpr_hazard_one_cycle =
-        (ex_mem_reg.prev_reg_write && (ex_mem_reg.prev_rd != 0)) &&
-        (ex_mem_reg.prev_rd == if_id_rs1 || ex_mem_reg.prev_rd == if_id_rs2);
+    bool gpr_hazard_one_cycle = (ex_mem_reg.prev_reg_write && (ex_mem_reg.prev_rd != 0)) &&
+                                consumer_reads_gpr(ex_mem_reg.prev_rd);
 
     bool gpr_hazard = gpr_hazard_one_cycle || gpr_hazard_two_cycle;
 
@@ -62,12 +87,13 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
     // Note: FPR f0 is NOT hardwired to zero (unlike GPR x0), so no frd != 0 check needed.
     // Two-cycle hazard: current EX/MEM instruction writes an FPR the IF/ID instruction reads
     bool fpr_hazard_two_cycle =
-        (ex_mem_reg.freg_write) && (ex_mem_reg.frd == if_id_frs1 || ex_mem_reg.frd == if_id_frs2 ||
-                                    ex_mem_reg.frd == if_id_frs3);
+        is_float_consumer && (ex_mem_reg.freg_write) &&
+        (ex_mem_reg.frd == if_id_frs1 || ex_mem_reg.frd == if_id_frs2 ||
+         ex_mem_reg.frd == if_id_frs3);
 
     // One-cycle hazard: previous EX/MEM instruction writes an FPR the IF/ID instruction reads
     bool fpr_hazard_one_cycle =
-        (ex_mem_reg.prev_freg_write) &&
+        is_float_consumer && (ex_mem_reg.prev_freg_write) &&
         (ex_mem_reg.prev_frd == if_id_frs1 || ex_mem_reg.prev_frd == if_id_frs2 ||
          ex_mem_reg.prev_frd == if_id_frs3);
 
@@ -88,9 +114,9 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
         {
             // Check if the load destination matches any source of the dependent instruction
             bool gpr_load_use = (id_ex_reg.reg_write && id_ex_reg.rd != 0) &&
-                                (id_ex_reg.rd == if_id_rs1 || id_ex_reg.rd == if_id_rs2);
+                                consumer_reads_gpr(id_ex_reg.rd);
 
-            bool fpr_load_use = (id_ex_reg.freg_write) &&
+            bool fpr_load_use = is_float_consumer && (id_ex_reg.freg_write) &&
                                 (id_ex_reg.frd == if_id_frs1 || id_ex_reg.frd == if_id_frs2 ||
                                  id_ex_reg.frd == if_id_frs3);
 
