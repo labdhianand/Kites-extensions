@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
 #include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -410,4 +413,97 @@ TEST(OptimizerSourceSimulation, SuggestionsForNoHazardVariantsStayCorrectAndTurn
     // Generous hand-written padding is turned into real savings.
     EXPECT_GT(savedNoForwarding, 0);
     EXPECT_GT(savedForwarding, 0);
+}
+
+// ---------------------------------------------------------------------------
+// padOnly: the fair baseline for the variants without hazard detection
+// ---------------------------------------------------------------------------
+namespace
+{
+std::string padded(const std::string &source, PipelineVariant variant)
+{
+    OptimizeOptions options;
+    options.variant = variant;
+    options.padOnly = true;
+    return optimizeSource(source, options).source;
+}
+} // namespace
+
+TEST(OptimizerPadOnly, PadsInsideABlockWithoutReordering)
+{
+    EXPECT_EQ(padded("lw x1, 0(x10)\nadd x2, x1, x1\n", PipelineVariant::NH_NF),
+              "lw x1, 0(x10)\n"
+              "addi x0, x0, 0  # padding\n"
+              "addi x0, x0, 0  # padding\n"
+              "add x2, x1, x1\n");
+}
+
+TEST(OptimizerPadOnly, PadsTheEndOfABlockWhoseValueTheNextBlockReads)
+{
+    EXPECT_EQ(padded("    addi x5, x0, 1\nnext:\n    add x6, x5, x5\n", PipelineVariant::NH_NF),
+              "    addi x5, x0, 1\n"
+              "    addi x0, x0, 0  # padding\n"
+              "    addi x0, x0, 0  # padding\n"
+              "next:\n"
+              "    add x6, x5, x5\n");
+}
+
+TEST(OptimizerPadOnly, PaddingAtTheEndGoesBeforeTheBranch)
+{
+    EXPECT_EQ(padded("    addi x5, x0, 1\n    beq x0, x0, next\nnext:\n    add x6, x5, x5\n",
+                     PipelineVariant::NH_NF),
+              "    addi x5, x0, 1\n"
+              "    addi x0, x0, 0  # padding\n"
+              "    beq x0, x0, next\n"
+              "next:\n"
+              "    add x6, x5, x5\n");
+}
+
+TEST(OptimizerPadOnly, ChangesNothingWhereTheHardwareStalls)
+{
+    const std::string source = "lw x1, 0(x10)\nadd x2, x1, x1\n";
+    EXPECT_EQ(padded(source, PipelineVariant::H_NF), source);
+    EXPECT_EQ(padded(source, PipelineVariant::H_F), source);
+}
+
+TEST(OptimizerPadOnly, PaddingInsideAPseudoInstructionIsAnError)
+{
+    // li 100000 is lui + addi on the same register, which needs padding between the two.
+    EXPECT_THROW((void)padded("li x5, 100000\n", PipelineVariant::NH_NF), std::runtime_error);
+}
+
+TEST(OptimizerPadOnlySimulation, EveryBenchmarkIsCorrectOnceItIsPadded)
+{
+    setupVmStateDirectory();
+    size_t benchmarkCount = 0;
+    size_t wrongUnpaddedCount = 0;
+    for (const auto &entry : std::filesystem::directory_iterator("../benchmarks"))
+    {
+        if (entry.path().extension() != ".s")
+        {
+            continue;
+        }
+        std::ifstream file(entry.path());
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        const std::string source = buffer.str();
+        SCOPED_TRACE(entry.path().filename().string());
+
+        const Snapshot reference = runOn<RVSSProcessor>(assembleSource(source)).snapshot;
+        const auto noForwarding =
+            runOn<RV5StageProcessorNHNF>(assembleSource(padded(source, PipelineVariant::NH_NF)));
+        const auto forwarding =
+            runOn<RV5StageProcessorNHF>(assembleSource(padded(source, PipelineVariant::NH_F)));
+        EXPECT_EQ(noForwarding.snapshot.gprs, reference.gprs) << "NH_NF";
+        EXPECT_EQ(forwarding.snapshot.gprs, reference.gprs) << "NH_F";
+
+        if (runOn<RV5StageProcessorNHNF>(assembleSource(source)).snapshot.gprs != reference.gprs)
+        {
+            ++wrongUnpaddedCount;
+        }
+        ++benchmarkCount;
+    }
+    EXPECT_GE(benchmarkCount, 8u);
+    // Guards the test itself: written without padding, the benchmarks really are wrong on NH_NF.
+    EXPECT_GT(wrongUnpaddedCount, benchmarkCount / 2);
 }

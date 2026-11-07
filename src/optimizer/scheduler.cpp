@@ -123,7 +123,9 @@ std::vector<int> chainLengths(const ProgramModel &model, const BasicBlock &block
 // them.
 struct BoundaryProfile
 {
-    std::array<int, kRegisterSlotCount> exitDistance{}; ///< -1 if the block never writes it
+    /// Slots from the register's last write to the end of the block (the block's length if the
+    /// block does not write it).
+    std::array<int, kRegisterSlotCount> exitDistance{};
     std::array<int, kRegisterSlotCount> firstReadSlot{}; ///< -1 if the block never reads it live-in
 
     BoundaryProfile()
@@ -159,12 +161,14 @@ BoundaryProfile boundaryProfileOf(const ProgramModel &model,
         }
     }
 
+    // A register the block does not write was written before the block started, so its value is
+    // at least the whole block away from the end: the block's length is its exit distance. That
+    // way a block that gets shorter still protects values that only pass through it.
     for (size_t reg = 0; reg < kRegisterSlotCount; ++reg)
     {
-        if (lastWriteSlot[reg] >= 0)
-        {
-            profile.exitDistance[reg] = timeline.slotCount - 1 - lastWriteSlot[reg];
-        }
+        profile.exitDistance[reg] = lastWriteSlot[reg] >= 0
+                                        ? timeline.slotCount - 1 - lastWriteSlot[reg]
+                                        : timeline.slotCount;
     }
     return profile;
 }
@@ -172,26 +176,49 @@ BoundaryProfile boundaryProfileOf(const ProgramModel &model,
 // A producer in a neighbouring block and a consumer here are `exit + 1 + slot` slots apart, and
 // anything at least `maxGap` apart is safe. So it is enough that each distance either stays at
 // least as large as before or is already `maxGap - 1`, the point from which the other side cannot
-// matter. Only needed where the hardware does not stall for the consumer. A register that nothing
-// after the block reads needs no protection on the way out.
-bool preservesBoundary(const BoundaryProfile &before, const BoundaryProfile &after, int maxGap,
-                       const RegisterSet &liveOut)
+// matter. Only needed where the hardware does not stall for the consumer.
+//
+// On the way in, a register the block reads before writing must not be read sooner than that.
+// When the caller knows how far from their end the previous blocks write each register, it can say
+// exactly how soon each one may be read instead.
+bool preservesEntry(const BoundaryProfile &before, const BoundaryProfile &after, int maxGap,
+                    const std::optional<std::array<int, 64>> &earliestFirstRead)
 {
     const int safe = maxGap - 1;
     for (size_t reg = 0; reg < kRegisterSlotCount; ++reg)
     {
-        if (liveOut[reg] && before.exitDistance[reg] >= 0 &&
-            after.exitDistance[reg] < std::min(before.exitDistance[reg], safe))
+        if (before.firstReadSlot[reg] < 0)
         {
-            return false;
+            continue;
         }
-        if (before.firstReadSlot[reg] >= 0 &&
-            after.firstReadSlot[reg] < std::min(before.firstReadSlot[reg], safe))
+        const int earliest = earliestFirstRead ? (*earliestFirstRead)[reg]
+                                               : std::min(before.firstReadSlot[reg], safe);
+        if (after.firstReadSlot[reg] < earliest)
         {
             return false;
         }
     }
     return true;
+}
+
+// On the way out, a register a later block may read must not be written closer to the end than
+// that. Instead of refusing a schedule that breaks this, pad the end of the block (before its
+// branch, if it has one): every NOP there adds one slot of distance. Returns how many are needed.
+// A register that nothing after the block reads needs no protection.
+int tailPaddingNeeded(const BoundaryProfile &before, const BoundaryProfile &after, int maxGap,
+                      const RegisterSet &liveOut)
+{
+    const int safe = maxGap - 1;
+    int padding = 0;
+    for (size_t reg = 0; reg < kRegisterSlotCount; ++reg)
+    {
+        if (liveOut[reg] && before.exitDistance[reg] >= 0)
+        {
+            padding = std::max(padding, std::min(before.exitDistance[reg], safe) -
+                                            after.exitDistance[reg]);
+        }
+    }
+    return padding;
 }
 
 struct Attempt
@@ -355,28 +382,33 @@ BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
     for (bool dropNops : attempts)
     {
         const Attempt attempt = listSchedule(model, block, graph, chain, costModel, dropNops);
-        if (attempt.timeline.slotCount >= original.slotCount)
-        {
-            continue;
-        }
 
         // A hazard-detecting variant stalls for a neighbour's producer or consumer anyway; the
         // others silently compute a wrong value, so the block must look the same from outside.
+        int tailPadding = 0;
         if (!costModel.detectsHazards())
         {
             const BoundaryProfile boundary = boundaryProfileOf(
                 model, flatten(model, block, attempt.order), attempt.timeline);
+            if (!preservesEntry(originalBoundary, boundary, costModel.maxGap(),
+                                options.earliestFirstRead))
+            {
+                refusedForBoundary = true;
+                continue;
+            }
             RegisterSet liveOut;
             liveOut.set(); // unknown successors: assume everything is read
             if (options.liveOut)
             {
                 liveOut = *options.liveOut;
             }
-            if (!preservesBoundary(originalBoundary, boundary, costModel.maxGap(), liveOut))
-            {
-                refusedForBoundary = true;
-                continue;
-            }
+            tailPadding = tailPaddingNeeded(originalBoundary, boundary, costModel.maxGap(), liveOut);
+        }
+
+        const int slots = attempt.timeline.slotCount + tailPadding;
+        if (slots >= original.slotCount)
+        {
+            continue;
         }
 
         BlockSchedule schedule;
@@ -384,9 +416,10 @@ BlockSchedule scheduleBlock(const ProgramModel &model, const BasicBlock &block,
         schedule.droppedUnits = attempt.droppedUnits;
         schedule.bubblesBefore = bubblesBeforeUnits(model, block, attempt.order, attempt.timeline);
         schedule.originalSlots = original.slotCount;
-        schedule.scheduledSlots = attempt.timeline.slotCount;
+        schedule.tailPadding = tailPadding;
+        schedule.scheduledSlots = slots;
         schedule.originalBubbles = original.bubbleCount;
-        schedule.scheduledBubbles = attempt.timeline.bubbleCount;
+        schedule.scheduledBubbles = attempt.timeline.bubbleCount + tailPadding;
         schedule.changed = true;
         return schedule;
     }

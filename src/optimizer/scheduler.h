@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -34,6 +35,12 @@ struct ScheduleOptions
     /// without hazard detection only these need their last write kept far enough from the end of
     /// the block. If unset, every register is assumed live, which is always safe.
     std::optional<RegisterSet> liveOut;
+
+    /// For each register (32 GPRs then 32 FPRs), the earliest slot of the block in which it may
+    /// first be read, given how close to their end the blocks that can run before this one write
+    /// it (see optimizer.cpp). Only used without hazard detection. If unset, a register the block
+    /// reads on entry is simply never read earlier than in the original, which is always safe.
+    std::optional<std::array<int, 64>> earliestFirstRead;
 };
 
 struct BlockSchedule
@@ -49,6 +56,11 @@ struct BlockSchedule
     /// that fall inside a multi-instruction unit are counted in the totals but not listed here,
     /// since a source line cannot be padded in the middle.
     std::vector<int> bubblesBefore;
+
+    /// NOPs to put at the end of the block (before its branch, if it has one) so that a value a
+    /// later block reads is not written too close to the end. Only on variants without hazard
+    /// detection; counted in scheduledSlots and scheduledBubbles.
+    int tailPadding{0};
 
     int originalSlots{0};
     int scheduledSlots{0};

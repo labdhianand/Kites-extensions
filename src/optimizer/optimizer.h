@@ -32,6 +32,13 @@ struct OptimizeOptions
     /// Extra cycles to plan for on every load, for the simulator's non-blocking memory-latency
     /// model (see cost_model.h). 0 plans for loads that always hit.
     int loadExtraLatency{0};
+
+    /// Do not reorder anything: keep the original order and only insert the NOPs a variant
+    /// without hazard detection needs to compute the right result. Inside a block that is what the
+    /// timeline asks for; at the end of a block, every register a later block may read is given
+    /// enough distance to be safe whatever runs next. This is the fair baseline to compare a
+    /// reordering against. On a variant with hazard detection it changes nothing.
+    bool padOnly{false};
 };
 
 /// What happened to one basic block.
@@ -69,8 +76,9 @@ struct OptimizeResult
  * Only reorders inside basic blocks, so labels, branches and jumps keep their meaning. On variants
  * without hazard detection the padding NOPs the new order needs are inserted.
  *
- * @throws std::runtime_error if `source` does not assemble. The suggestion is assembled as well
- * as a safety net, and a failure there throws too, though it is not expected.
+ * @throws std::runtime_error if `source` does not assemble, or if padOnly would need padding in the
+ * middle of a pseudo-instruction (which a source line cannot express). The suggestion is assembled
+ * as well as a safety net, and a failure there throws too, though it is not expected.
  */
 [[nodiscard]] OptimizeResult optimizeSource(const std::string &source,
                                             const OptimizeOptions &options);
