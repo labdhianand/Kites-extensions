@@ -20,7 +20,6 @@ using namespace optimizer_test;
 
 namespace
 {
-constexpr uint32_t kNopWord = 0x00000013; // addi x0, x0, 0
 
 CostModel modelFor(PipelineVariant variant)
 {
@@ -211,21 +210,6 @@ unsigned fillAndDrainCycles(const std::function<unsigned(const AssembledProgram 
     return cyclesOf(assembleSource(source)) - 12;
 }
 
-// The program with the model's bubbles inserted as real NOP instructions.
-AssembledProgram padded(const AssembledProgram &program, const Timeline &timeline)
-{
-    AssembledProgram result = program;
-    result.text_buffer.clear();
-    for (size_t position = 0; position < program.text_buffer.size(); ++position)
-    {
-        for (int bubble = 0; bubble < timeline.bubblesBefore[position]; ++bubble)
-        {
-            result.text_buffer.push_back(kNopWord);
-        }
-        result.text_buffer.push_back(program.text_buffer[position]);
-    }
-    return result;
-}
 } // namespace
 
 TEST(OptimizerCostModelValidation, HazardDetectingVariantsMatchMeasuredCycles)
@@ -280,7 +264,7 @@ TEST(OptimizerCostModelValidation, PaddingTheModelsBubblesMakesNoHazardVariantsC
 
         const Timeline nhNf =
             estimateTimeline(model, modelFor(PipelineVariant::NH_NF), writtenOrder(model));
-        EXPECT_TRUE(runOn<RV5StageProcessorNHNF>(padded(program, nhNf)).snapshot == reference)
+        EXPECT_TRUE(runOn<RV5StageProcessorNHNF>(paddedWithNops(program, nhNf)).snapshot == reference)
             << "NH_NF padded";
         if (!(runOn<RV5StageProcessorNHNF>(program).snapshot == reference))
         {
@@ -289,7 +273,7 @@ TEST(OptimizerCostModelValidation, PaddingTheModelsBubblesMakesNoHazardVariantsC
 
         const Timeline nhF =
             estimateTimeline(model, modelFor(PipelineVariant::NH_F), writtenOrder(model));
-        EXPECT_TRUE(runOn<RV5StageProcessorNHF>(padded(program, nhF)).snapshot == reference)
+        EXPECT_TRUE(runOn<RV5StageProcessorNHF>(paddedWithNops(program, nhF)).snapshot == reference)
             << "NH_F padded";
     }
 
