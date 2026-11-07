@@ -4,6 +4,9 @@
  */
 #include "optimizer/optimizer.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -13,6 +16,7 @@
 #include "optimizer/program_model.h"
 #include "optimizer/scheduler.h"
 #include "optimizer/source_text.h"
+#include "optimizer/timeline.h"
 
 namespace Kites
 {
@@ -56,16 +60,177 @@ void rewriteBlock(const SourceText &source, const ProgramModel &model, const Bas
         const unsigned bodyLine = model.units[block.firstUnit + schedule.unitOrder[slot]].sourceLine;
         const SplitLine bodySource = splitLine(source.lines.at(bodyLine - 1));
 
+        // The end-of-block padding goes before the branch, or after the last instruction.
+        const bool lastSlot = slot + 1 == schedule.unitOrder.size();
+        const int tail = insertPadding && lastSlot ? schedule.tailPadding : 0;
+
         std::string prefix = slotLine.prefix;
-        const int padding = insertPadding ? schedule.bubblesBefore[slot] : 0;
+        const int padding =
+            (insertPadding ? schedule.bubblesBefore[slot] : 0) + (block.hasTerminator ? tail : 0);
         for (int i = 0; i < padding; ++i)
         {
             output.push_back(prefix + kPaddingLine);
             prefix = leadingWhitespace(slotLine.prefix); // the label, if any, came first
         }
         output.push_back(prefix + bodySource.body);
+        for (int i = 0; !block.hasTerminator && i < tail; ++i)
+        {
+            output.push_back(leadingWhitespace(slotLine.prefix) + kPaddingLine);
+        }
         replacements[line] = output;
     }
+}
+
+size_t registerSlot(RegRef reg)
+{
+    return (reg.file == RegFile::Fpr ? 32 : 0) + reg.index;
+}
+
+// The block in its original order with just the NOPs a variant without hazard detection needs:
+// what the timeline asks for inside the block, and enough at the end that every register a later
+// block may read was written at least maxGap - 1 slots before the block ends. A consumer at the
+// start of the next block is then always far enough away, whatever block it is.
+void padBlock(const SourceText &source, const ProgramModel &model, const BasicBlock &block,
+              const CostModel &costModel, const RegisterSet &liveOut,
+              std::map<unsigned, std::vector<std::string>> &replacements)
+{
+    std::vector<size_t> instructions;
+    for (size_t k = block.firstInstruction; k < block.firstInstruction + block.instructionCount; ++k)
+    {
+        instructions.push_back(k);
+    }
+    const Timeline timeline = estimateTimeline(model, costModel, instructions);
+
+    // Padding can only go before a whole source line.
+    for (size_t node = 0; node < block.unitCount; ++node)
+    {
+        const Unit &unit = model.units[block.firstUnit + node];
+        for (size_t k = unit.firstInstruction + 1; k < unit.firstInstruction + unit.instructionCount;
+             ++k)
+        {
+            if (timeline.bubblesBefore[k - block.firstInstruction] > 0)
+            {
+                throw std::runtime_error("line " + std::to_string(unit.sourceLine) +
+                                         " would need padding in the middle of a "
+                                         "pseudo-instruction, which a source line cannot express");
+            }
+        }
+    }
+
+    // Registers the terminator writes itself (the link register of a call) cannot be helped by
+    // padding placed before it; nothing reads them straight away in practice.
+    const size_t terminator = block.hasTerminator ? block.instructionCount - 1 : SIZE_MAX;
+    std::array<int, 64> lastWriteSlot{};
+    lastWriteSlot.fill(-1);
+    for (size_t position = 0; position < instructions.size(); ++position)
+    {
+        const InstrInfo &info = model.instructions[instructions[position]];
+        if (info.dest.isValid() && position != terminator)
+        {
+            lastWriteSlot[registerSlot(info.dest)] = timeline.issueSlot[position];
+        }
+    }
+    const int safeDistance = costModel.maxGap() - 1;
+    int tail = 0;
+    for (size_t reg = 0; reg < 64; ++reg)
+    {
+        if (liveOut[reg] && lastWriteSlot[reg] >= 0)
+        {
+            const int exitDistance = timeline.slotCount - 1 - lastWriteSlot[reg];
+            tail = std::max(tail, safeDistance - exitDistance);
+        }
+    }
+
+    for (size_t node = 0; node < block.unitCount; ++node)
+    {
+        const Unit &unit = model.units[block.firstUnit + node];
+        const SplitLine line = splitLine(source.lines.at(unit.sourceLine - 1));
+        const bool isTerminator = block.hasTerminator && node + 1 == block.unitCount;
+        const int padding = timeline.bubblesBefore[unit.firstInstruction - block.firstInstruction] +
+                            (isTerminator ? tail : 0);
+
+        std::vector<std::string> output;
+        std::string prefix = line.prefix;
+        for (int i = 0; i < padding; ++i)
+        {
+            output.push_back(prefix + kPaddingLine);
+            prefix = leadingWhitespace(line.prefix); // the label, if any, came first
+        }
+        output.push_back(prefix + line.body);
+        if (!block.hasTerminator && node + 1 == block.unitCount)
+        {
+            for (int i = 0; i < tail; ++i)
+            {
+                output.push_back(leadingWhitespace(line.prefix) + kPaddingLine);
+            }
+        }
+        replacements[unit.sourceLine] = output;
+    }
+}
+
+// For a variant without hazard detection: how soon each block may first read each register.
+//
+// A value produced `exit` slots before the end of a block that runs just before this one, and read
+// at `slot` here, is `exit + 1 + slot` slots away and needs at least maxGap. The scheduler never
+// lets a live-out register's exit distance drop below min(original exit, maxGap - 1), so that
+// lower bound is what each predecessor guarantees. A predecessor that does not write the register
+// at all puts its whole length between the producer and this block. A block entered from somewhere
+// unknown gets the worst case; the program start has no earlier producer at all.
+std::vector<std::array<int, 64>> earliestFirstReads(const ProgramModel &model,
+                                                    const CostModel &costModel)
+{
+    const int safe = costModel.maxGap() - 1;
+    const size_t blockCount = model.blocks.size();
+    const ControlFlow flow = computeControlFlow(model);
+    const std::vector<BlockLiveness> liveness = computeLiveness(model);
+
+    // What each block guarantees on the way out, register by register.
+    std::vector<std::array<int, 64>> guaranteedExit(blockCount);
+    for (size_t b = 0; b < blockCount; ++b)
+    {
+        const BasicBlock &block = model.blocks[b];
+        std::vector<size_t> instructions;
+        for (size_t k = block.firstInstruction; k < block.firstInstruction + block.instructionCount;
+             ++k)
+        {
+            instructions.push_back(k);
+        }
+        const Timeline timeline = estimateTimeline(model, costModel, instructions);
+        guaranteedExit[b].fill(std::min(timeline.slotCount, safe));
+        for (size_t position = 0; position < instructions.size(); ++position)
+        {
+            const InstrInfo &info = model.instructions[instructions[position]];
+            if (info.dest.isValid())
+            {
+                guaranteedExit[b][registerSlot(info.dest)] =
+                    std::min(timeline.slotCount - 1 - timeline.issueSlot[position], safe);
+            }
+        }
+    }
+
+    std::vector<std::array<int, 64>> earliest(blockCount);
+    for (size_t b = 0; b < blockCount; ++b)
+    {
+        earliest[b].fill(0);
+        for (size_t reg = 0; reg < 64; ++reg)
+        {
+            if (!liveness[b].liveIn[reg])
+            {
+                continue;
+            }
+            int closestExit = safe; // the program start: nothing was produced just before
+            if (flow.hasUnknownPredecessors[b])
+            {
+                closestExit = 0;
+            }
+            for (size_t predecessor : flow.predecessors[b])
+            {
+                closestExit = std::min(closestExit, guaranteedExit[predecessor][reg]);
+            }
+            earliest[b][reg] = safe - closestExit;
+        }
+    }
+    return earliest;
 }
 
 void checkAssembles(const std::string &source, const char *what)
@@ -122,14 +287,34 @@ OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions
     const SourceText text = splitSource(source);
     std::map<unsigned, std::vector<std::string>> replacements;
 
+    const std::vector<std::array<int, 64>> firstReads =
+        insertPadding ? earliestFirstReads(model, costModel) : std::vector<std::array<int, 64>>{};
+
     bool rescheduled = false;
-    for (size_t b = 0; b < model.blocks.size(); ++b)
+    if (options.padOnly)
+    {
+        // Keep the order; only pad, and only where the hardware does not stall by itself.
+        if (insertPadding)
+        {
+            for (size_t b = 0; b < model.blocks.size(); ++b)
+            {
+                padBlock(text, model, model.blocks[b], costModel, liveness[b].liveOut,
+                         replacements);
+            }
+            rescheduled = true;
+        }
+    }
+    for (size_t b = 0; !options.padOnly && b < model.blocks.size(); ++b)
     {
         const BasicBlock &block = model.blocks[b];
 
         ScheduleOptions scheduleOptions;
         scheduleOptions.dropNops = options.dropNops;
         scheduleOptions.liveOut = liveness[b].liveOut;
+        if (insertPadding)
+        {
+            scheduleOptions.earliestFirstRead = firstReads[b];
+        }
         const BlockSchedule schedule = scheduleBlock(model, block, costModel, scheduleOptions);
 
         BlockSummary summary;
@@ -174,6 +359,7 @@ OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions
         }
     }
     result.source = joinSource(rewritten);
+    result.changed = result.source != original;
 
     checkAssembles(result.source, "the suggested program does not assemble");
     return result;

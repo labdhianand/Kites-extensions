@@ -487,3 +487,33 @@ TEST(OptimizerSchedulerSimulation, DroppingHandWrittenPaddingKeepsResultsAndSave
     EXPECT_TRUE(after.snapshot == before.snapshot);
     EXPECT_LT(after.cycles, before.cycles);
 }
+
+TEST(OptimizerScheduler, PadsTheEndOfTheBlockInsteadOfGivingUpAReordering)
+{
+    // The next block stores x2 straight away. Dropping the NOPs and filling the load's shadow
+    // leaves `add x2` one slot from the end, which is too close without hazard detection; one NOP
+    // at the end fixes that, and the block is still a slot shorter than before.
+    const std::string source = R"(
+        lw   x1, 0(x10)
+        addi x0, x0, 0
+        addi x0, x0, 0
+        add  x2, x1, x1
+        addi x5, x0, 1
+        addi x6, x0, 2
+        addi x7, x0, 3
+    )";
+    ScheduleOptions options;
+    options.dropNops = true;
+    RegisterSet readsX2;
+    readsX2.set(2);
+    options.liveOut = readsX2;
+
+    const BlockSchedule schedule = scheduleFirstBlock(source, PipelineVariant::NH_NF, options);
+    EXPECT_TRUE(schedule.changed);
+    EXPECT_EQ(schedule.originalSlots, 7);
+    EXPECT_EQ(schedule.tailPadding, 1);
+    EXPECT_EQ(schedule.scheduledSlots, 6);
+
+    // With hazard detection no end padding is ever needed.
+    EXPECT_EQ(scheduleFirstBlock(source, PipelineVariant::H_NF, options).tailPadding, 0);
+}
