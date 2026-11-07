@@ -25,9 +25,12 @@ if(VM_DEBUG_PRINTS)
     target_compile_definitions(kites_test PRIVATE VM_DEBUG_PRINTS)
 endif()
 
+# A freshly built debug executable can take longer than CMake's default 5 s to start the first
+# time on Windows, which made test discovery fail right after a rebuild.
 gtest_discover_tests(kites_test
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test
     DISCOVERY_MODE PRE_TEST
+    DISCOVERY_TIMEOUT 60
     PROPERTIES
         FAIL_REGULAR_EXPRESSION ".*FAILED.*"
 )
@@ -64,6 +67,7 @@ if(ENABLE_COVERAGE)
     gtest_discover_tests(kites_test_cov
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test
         DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 60
         TEST_PREFIX "cov_"
         PROPERTIES
             FAIL_REGULAR_EXPRESSION ".*FAILED.*"
