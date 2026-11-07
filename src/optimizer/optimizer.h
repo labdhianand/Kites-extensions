@@ -28,6 +28,10 @@ struct OptimizeOptions
     /// Unroll counted loops by up to this factor before scheduling (see loop_unroller.h). 1 means
     /// no unrolling. Unrolling changes the code size, so it is off unless asked for.
     int unrollFactor{1};
+
+    /// Extra cycles to plan for on every load, for the simulator's non-blocking memory-latency
+    /// model (see cost_model.h). 0 plans for loads that always hit.
+    int loadExtraLatency{0};
 };
 
 /// What happened to one basic block.
