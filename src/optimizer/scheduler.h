@@ -11,10 +11,12 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "optimizer/cost_model.h"
+#include "optimizer/liveness.h"
 #include "optimizer/program_model.h"
 
 namespace Kites
@@ -27,6 +29,11 @@ struct ScheduleOptions
     /// really needs. This is what turns hand-written padding on a no-hazard-detection variant into
     /// useful work.
     bool dropNops{false};
+
+    /// Registers that may still be read after this block ends (see liveness.h). On a variant
+    /// without hazard detection only these need their last write kept far enough from the end of
+    /// the block. If unset, every register is assumed live, which is always safe.
+    std::optional<RegisterSet> liveOut;
 };
 
 struct BlockSchedule

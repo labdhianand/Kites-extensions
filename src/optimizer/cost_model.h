@@ -48,6 +48,12 @@ struct CostModel
         return variant == PipelineVariant::H_NF || variant == PipelineVariant::H_F;
     }
 
+    /// The largest minGap of any producer on this variant.
+    [[nodiscard]] int maxGap() const
+    {
+        return hasForwarding() ? 2 : 3;
+    }
+
     /// The smallest distance, in issue slots, at which a consumer sees the result of `producer`.
     [[nodiscard]] int minGap(const InstrInfo &producer) const
     {

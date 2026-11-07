@@ -157,9 +157,11 @@ TEST(OptimizerScheduler, HandWrittenNopPaddingBecomesUsefulWorkWhenDropped)
         addi x5, x0, 1
         addi x6, x0, 2
     )";
-    // Without hazard detection the two NOPs are what makes `add` read the loaded value.
+    // Without hazard detection the two NOPs are what makes `add` read the loaded value. Nothing
+    // runs after this block, so nothing needs protecting on the way out.
     ScheduleOptions drop;
     drop.dropNops = true;
+    drop.liveOut = RegisterSet();
     const BlockSchedule schedule = scheduleFirstBlock(source, PipelineVariant::NH_NF, drop);
     EXPECT_TRUE(schedule.changed);
     EXPECT_EQ(schedule.unitOrder, (Order{0, 4, 5, 3}));
@@ -172,6 +174,79 @@ TEST(OptimizerScheduler, HandWrittenNopPaddingBecomesUsefulWorkWhenDropped)
     // job of filler.
     const BlockSchedule kept = scheduleFirstBlock(source, PipelineVariant::NH_NF);
     EXPECT_FALSE(kept.changed);
+}
+
+TEST(OptimizerScheduler, KeepsPaddingThatProtectsTheNextBlockOnNoHazardVariants)
+{
+    // The two trailing NOPs exist so that the next block can read x2 safely. They look like
+    // droppable padding from inside this block, but removing them would hand the next block a
+    // stale value.
+    const std::string source = R"(
+        lw   x1, 0(x10)
+        addi x0, x0, 0
+        addi x0, x0, 0
+        add  x2, x1, x1
+        addi x0, x0, 0
+        addi x0, x0, 0
+    next:
+        add  x6, x2, x2
+    )";
+    ScheduleOptions drop;
+    drop.dropNops = true;
+    const BlockSchedule schedule = scheduleFirstBlock(source, PipelineVariant::NH_NF, drop);
+    EXPECT_FALSE(schedule.changed);
+    EXPECT_TRUE(schedule.droppedUnits.empty());
+}
+
+TEST(OptimizerScheduler, MovingAConsumerToTheStartOfABlockIsRefusedOnNoHazardVariants)
+{
+    // `add x6, x2, x2` reads x2, which the previous block may have written just before. A later
+    // instruction depends on x6, so the scheduler wants to hoist it to the very top, but that would
+    // shrink the distance from the previous block's producer and the hardware will not stall to
+    // fix it.
+    const std::string source = R"(
+        addi x5, x0, 1
+        addi x8, x0, 3
+        add  x6, x2, x2
+        add  x7, x6, x6
+    )";
+    EXPECT_FALSE(scheduleFirstBlock(source, PipelineVariant::NH_NF).changed);
+
+    // With hazard detection the hardware stalls if the previous block's producer is too close, so
+    // the same hoist is fine.
+    EXPECT_TRUE(scheduleFirstBlock(source, PipelineVariant::H_NF).changed);
+}
+
+TEST(OptimizerScheduler, OnlyRegistersThatAreReadAfterTheBlockNeedProtecting)
+{
+    const std::string source = R"(
+        lw   x1, 0(x10)
+        addi x0, x0, 0
+        addi x0, x0, 0
+        add  x2, x1, x1
+        addi x5, x0, 1
+        addi x6, x0, 2
+    )";
+    ScheduleOptions options;
+    options.dropNops = true;
+
+    // x2 is the register whose last write would end up too close to the end of the block.
+    RegisterSet readsX2;
+    readsX2.set(2);
+    options.liveOut = readsX2;
+    EXPECT_FALSE(scheduleFirstBlock(source, PipelineVariant::NH_NF, options).changed);
+
+    // Nothing, or an unrelated register, is read afterwards, so the same reordering is safe.
+    options.liveOut = RegisterSet();
+    EXPECT_TRUE(scheduleFirstBlock(source, PipelineVariant::NH_NF, options).changed);
+    RegisterSet readsX9;
+    readsX9.set(9);
+    options.liveOut = readsX9;
+    EXPECT_TRUE(scheduleFirstBlock(source, PipelineVariant::NH_NF, options).changed);
+
+    // With hazard detection the hardware stalls the reader, so liveness is irrelevant.
+    options.liveOut = readsX2;
+    EXPECT_TRUE(scheduleFirstBlock(source, PipelineVariant::H_NF, options).changed);
 }
 
 TEST(OptimizerScheduler, ReportsPaddingTheModelNeedsBeforeEachUnit)
@@ -395,6 +470,7 @@ TEST(OptimizerSchedulerSimulation, DroppingHandWrittenPaddingKeepsResultsAndSave
 
     ScheduleOptions drop;
     drop.dropNops = true;
+    drop.liveOut = RegisterSet(); // this is the whole program, so nothing is read afterwards
     const BlockSchedule schedule = scheduleBlock(model, block, modelFor(PipelineVariant::NH_NF), drop);
     ASSERT_TRUE(schedule.changed);
 
