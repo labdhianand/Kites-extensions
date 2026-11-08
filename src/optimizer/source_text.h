@@ -41,6 +41,14 @@ struct SplitLine
 
 [[nodiscard]] std::string rightTrimmed(std::string text);
 
+/**
+ * @brief A unified diff of two texts (the `---`/`+++`/`@@` format of `git diff`), with `context`
+ * unchanged lines around each change. Empty if the texts have the same lines.
+ */
+[[nodiscard]] std::string unifiedDiff(const std::string &before, const std::string &after,
+                                      const std::string &beforeName, const std::string &afterName,
+                                      int context = 2);
+
 /// Replaces whole register names in the instruction part of `body` (not in a trailing comment).
 /// Both canonical (x5) and ABI (t0) names are recognised; replacements are written canonically.
 [[nodiscard]] std::string renameRegisters(const std::string &body,

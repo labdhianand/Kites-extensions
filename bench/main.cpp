@@ -13,22 +13,15 @@
  *
  * Usage: kites-bench <benchmarks-dir> [--markdown <file>] [--csv <file>]
  */
-#include "assembler/assembler.h"
+#include "benchmarking/program_runner.h"
 #include "optimizer/optimizer.h"
-#include "processor/rv5s/rv5s_processor_h_f.h"
-#include "processor/rv5s/rv5s_processor_h_nf.h"
-#include "processor/rv5s/rv5s_processor_nh_f.h"
-#include "processor/rv5s/rv5s_processor_nh_nf.h"
-#include "processor/rvss/rvss_processor.h"
 #include "utils/utils.h"
 
 #include <QCoreApplication>
 
 #include <algorithm>
-#include <array>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -36,146 +29,54 @@
 #include <vector>
 
 using namespace Kites;
+using namespace Kites::benchmarking;
 using namespace Kites::optimizer;
 
 namespace
 {
-constexpr uint64_t kDataStart = 0x10000000;
-constexpr uint64_t kDataBytesChecked = 1024;
 constexpr int kUnrollFactor = 4;
-
-// Everything a program leaves behind that the benchmarks care about.
-struct Snapshot
-{
-    std::array<uint64_t, 32> gprs{};
-    std::vector<uint32_t> data;
-};
-
-struct Run
-{
-    Snapshot snapshot;
-    unsigned cycles{0};
-};
 
 // A memory setting to measure under.
 struct MemorySetting
 {
     std::string title;
     std::string description;
-    bool coldCache{false};
-    int plannedLatency{0}; ///< what the optimizer is told to plan for on every load
+    MemorySetup setup;
+    int plannedLatency; ///< what the optimizer is told to plan for on every load
 };
 
 const std::vector<MemorySetting> kMemorySettings = {
-    {"Ideal memory", "Every access fits in the one-cycle MEM stage (the simulator's default).", false,
-     0},
+    {"Ideal memory", "Every access fits in the one-cycle MEM stage (the simulator's default).",
+     MemorySetup::Ideal, 0},
     {"Cold cache",
      "L1: 4 sets x 2 ways x 16 B (128 B). L2: 32 sets x 4 ways x 16 B (2 KB). Extra cycles per "
      "load: L1 hit +0, L2 hit +4, main memory +20. Loads are non-blocking on the variants with "
      "hazard detection and blocking on the others. The data starts in main memory only. The "
      "optimizer plans for the L2 latency (+4).",
-     true, 4},
+     MemorySetup::ColdCache, kColdCacheL2Latency},
 };
 
 struct VariantInfo
 {
     const char *name;
     PipelineVariant variant;
+    ProcessorType processor;
 };
 
-const std::vector<VariantInfo> kVariants = {{"NH_NF", PipelineVariant::NH_NF},
-                                            {"H_NF", PipelineVariant::H_NF},
-                                            {"NH_F", PipelineVariant::NH_F},
-                                            {"H_F", PipelineVariant::H_F}};
+const std::vector<VariantInfo> kVariants = {
+    {"NH_NF", PipelineVariant::NH_NF, ProcessorType::RV5Stage_NH_NF},
+    {"H_NF", PipelineVariant::H_NF, ProcessorType::RV5Stage_H_NF},
+    {"NH_F", PipelineVariant::NH_F, ProcessorType::RV5Stage_NH_F},
+    {"H_F", PipelineVariant::H_F, ProcessorType::RV5Stage_H_F}};
 
-// Silences the simulator's own per-cycle output.
-class QuietOutput
+std::vector<unsigned> renamedRegisters(const OptimizeResult &result)
 {
-  public:
-    QuietOutput() : m_previous(std::cout.rdbuf(m_sink.rdbuf()))
+    std::vector<unsigned> registers;
+    for (const LoopReport &loop : result.loops)
     {
+        registers.insert(registers.end(), loop.renamedTo.begin(), loop.renamedTo.end());
     }
-    ~QuietOutput()
-    {
-        std::cout.rdbuf(m_previous);
-    }
-
-  private:
-    std::ostringstream m_sink;
-    std::streambuf *m_previous;
-};
-
-void configureMemory(ProcessorBase &vm, const MemorySetting &setting)
-{
-    if (!setting.coldCache)
-    {
-        return;
-    }
-    vm.memory_controller_.getL2Cache()->reconfigure(CacheConfig{
-        32, 16, 4, WritePolicy::WriteBack, AllocationPolicy::WriteAllocate, ReplacementPolicy::LRU});
-    vm.memory_controller_.getL1Cache()->reconfigure(CacheConfig{
-        4, 16, 2, WritePolicy::WriteBack, AllocationPolicy::WriteAllocate, ReplacementPolicy::LRU});
-    vm.memory_timing_.enabled = true;
-    vm.memory_timing_.nonBlocking = true;
-    vm.memory_timing_.l1HitCycles = 0;
-    vm.memory_timing_.l2HitCycles = 4;
-    vm.memory_timing_.memoryCycles = 20;
-}
-
-template <typename Vm> Run runOn(const std::string &source, const MemorySetting &setting)
-{
-    std::istringstream stream(source);
-    const AssembledProgram program = assemble(stream);
-
-    QuietOutput quiet;
-    Vm vm;
-    configureMemory(vm, setting);
-    vm.LoadProgram(program);
-    vm.DebugRun();
-
-    Run run;
-    for (size_t i = 0; i < 32; ++i)
-    {
-        run.snapshot.gprs[i] = vm.registers_.ReadGpr(i);
-    }
-    for (uint64_t offset = 0; offset < kDataBytesChecked; offset += 4)
-    {
-        run.snapshot.data.push_back(vm.memory_controller_.readWord(kDataStart + offset));
-    }
-    run.cycles = vm.cycle_s_;
-    return run;
-}
-
-Run runOnVariant(PipelineVariant variant, const std::string &source, const MemorySetting &setting)
-{
-    switch (variant)
-    {
-    case PipelineVariant::NH_NF:
-        return runOn<RV5StageProcessorNHNF>(source, setting);
-    case PipelineVariant::H_NF:
-        return runOn<RV5StageProcessorHNF>(source, setting);
-    case PipelineVariant::NH_F:
-        return runOn<RV5StageProcessorNHF>(source, setting);
-    default:
-        return runOn<RV5StageProcessorHF>(source, setting);
-    }
-}
-
-// Same registers and data, ignoring registers the unroller started using (the original never
-// touched them, so their final values are not part of what it computes).
-bool sameResult(const Snapshot &reference, const Snapshot &actual,
-                const std::vector<LoopReport> &loops)
-{
-    Snapshot left = reference;
-    Snapshot right = actual;
-    for (const LoopReport &loop : loops)
-    {
-        for (unsigned reg : loop.renamedTo)
-        {
-            left.gprs[reg] = right.gprs[reg] = 0;
-        }
-    }
-    return left.gprs == right.gprs && left.data == right.data;
+    return registers;
 }
 
 struct Measurement
@@ -304,7 +205,7 @@ int main(int argc, char *argv[])
         {
             const std::string name = path.stem().string();
             const std::string source = readFile(path);
-            const Snapshot reference = runOn<RVSSProcessor>(source, MemorySetting{}).snapshot;
+            const ProgramState reference = runProgram(source, ProcessorType::RVSS).state;
 
             for (const VariantInfo &info : kVariants)
             {
@@ -331,15 +232,18 @@ int main(int argc, char *argv[])
                     m.unrolledLoops += loop.unrolled ? 1 : 0;
                 }
 
-                const Run before = runOnVariant(info.variant, original, setting);
-                const Run afterReorder = runOnVariant(info.variant, reordered.source, setting);
-                const Run afterUnroll = runOnVariant(info.variant, unrolled.source, setting);
+                const ProgramRun before = runProgram(original, info.processor, setting.setup);
+                const ProgramRun afterReorder =
+                    runProgram(reordered.source, info.processor, setting.setup);
+                const ProgramRun afterUnroll =
+                    runProgram(unrolled.source, info.processor, setting.setup);
                 m.original = before.cycles;
                 m.reordered = afterReorder.cycles;
                 m.unrolled = afterUnroll.cycles;
-                m.correct = sameResult(reference, before.snapshot, {}) &&
-                            sameResult(reference, afterReorder.snapshot, reordered.loops) &&
-                            sameResult(reference, afterUnroll.snapshot, unrolled.loops);
+                m.correct =
+                    sameResult(reference, before.state) &&
+                    sameResult(reference, afterReorder.state, renamedRegisters(reordered)) &&
+                    sameResult(reference, afterUnroll.state, renamedRegisters(unrolled));
                 allCorrect = allCorrect && m.correct;
 
                 std::cerr << std::left << std::setw(13) << setting.title << std::setw(18) << name
