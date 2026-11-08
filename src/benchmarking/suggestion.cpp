@@ -96,11 +96,15 @@ Suggestion makeSuggestion(const SuggestionRequest &request)
 
     options.dropNops = true;
     options.unrollFactor = request.unrollFactor;
+    options.allowDeadRegisterChanges = request.allowDeadRegisterChanges;
     suggestion.result = optimizer::optimizeSource(suggestion.baseline, options);
     for (const optimizer::LoopReport &loop : suggestion.result.loops)
     {
         suggestion.renamedRegisters.insert(suggestion.renamedRegisters.end(),
                                            loop.renamedTo.begin(), loop.renamedTo.end());
+        suggestion.changedDeadRegisters.insert(suggestion.changedDeadRegisters.end(),
+                                               loop.changedDeadRegisters.begin(),
+                                               loop.changedDeadRegisters.end());
     }
 
     if (request.measure)
@@ -113,8 +117,10 @@ Suggestion makeSuggestion(const SuggestionRequest &request)
         suggestion.baselineCycles = before.cycles;
         suggestion.suggestionCycles = after.cycles;
         suggestion.baselineCorrect = sameResult(reference.state, before.state);
-        suggestion.suggestionCorrect =
-            sameResult(reference.state, after.state, suggestion.renamedRegisters);
+        std::vector<unsigned> notCompared = suggestion.renamedRegisters;
+        notCompared.insert(notCompared.end(), suggestion.changedDeadRegisters.begin(),
+                           suggestion.changedDeadRegisters.end());
+        suggestion.suggestionCorrect = sameResult(reference.state, after.state, notCompared);
     }
     return suggestion;
 }

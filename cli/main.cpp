@@ -42,6 +42,9 @@ void printUsage(const char *programName)
         << "  --suggest           suggest a better instruction order for the pipeline given by\n"
         << "                      --vm (default rv5-h-f), show the diff and measure both\n"
         << "  --unroll <n>        also unroll counted loops by up to n\n"
+        << "  --only-live-registers  let registers nothing reads after a loop end\n"
+        << "                      differently, so unrolled loops can drop repeated\n"
+        << "                      address arithmetic\n"
         << "  --cold-cache        measure with cache latencies instead of ideal memory\n"
         << "  --plan-latency <n>  extra cycles per load to plan for (default 0, or 4 with\n"
         << "                      --cold-cache)\n"
@@ -125,6 +128,10 @@ int main(int argc, char *argv[])
         else if (arg == "--no-verify")
         {
             suggest.verify = false;
+        }
+        else if (arg == "--only-live-registers")
+        {
+            suggest.allowDeadRegisterChanges = true;
         }
         else if (arg == "--out")
         {

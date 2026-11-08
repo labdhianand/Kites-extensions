@@ -90,8 +90,8 @@ requested regions (4 rows starting at address `0x0`, then 2 rows starting at
 ## Reordering suggestions (`--suggest`)
 
 ```
-kites-cli <assembly-file> --suggest [--vm <rv5-...>] [--unroll <n>] [--cold-cache]
-          [--plan-latency <n>] [--out <file>] [--no-verify]
+kites-cli <assembly-file> --suggest [--vm <rv5-...>] [--unroll <n>] [--only-live-registers]
+          [--cold-cache] [--plan-latency <n>] [--out <file>] [--no-verify]
 ```
 
 Suggests a better instruction order for one of the pipelined processor models, shows it as a
@@ -102,6 +102,7 @@ that the suggestion computes exactly the same result.
 |---|---|
 | `--suggest` | Turn on suggestion mode. `--vm` then defaults to `rv5-h-f`; `rvss` is not accepted (a single-cycle processor has nothing to reorder for). |
 | `--unroll <n>` | Also unroll counted loops by up to `n`, when that is provably exact (fixed trip count divisible by the factor). Off by default, because it changes the code size. |
+| `--only-live-registers` | With `--unroll`: let the unrolled copies share one address computation (a later copy uses the first copy's address with a larger offset, `lw x5, 4(x30)`, and the counter steps once). Registers nothing reads after the loop may then end with different values; they are listed and left out of the comparison, while memory and every other register must still match. Without this flag every register must end the same, which leaves little to remove. |
 | `--cold-cache` | Measure with the cache-latency model (L1 128 B, L2 2 KB; +0 / +4 / +20 cycles per L1 hit / L2 hit / memory access) instead of ideal memory. |
 | `--plan-latency <n>` | Extra cycles per load the optimizer should plan for. Defaults to 0, or 4 (the L2 latency) with `--cold-cache`. |
 | `--out <file>` | Write the suggested program to `<file>`. |
@@ -143,6 +144,19 @@ Measured on rv5-h-f with ideal memory (every access takes one cycle):
   suggested           292 cycles   -24.7%
   result          identical to the original on the single-cycle processor
                   (registers the original never used are not compared)
+```
+
+With `--only-live-registers` the second copy reuses the first copy's address, so its `slli` and
+`add` go and the two counter steps become one `addi x12, x12, 2`:
+
+```
+$ kites-cli benchmarks/vector_add.s --suggest --vm rv5-h-f --unroll 2 --only-live-registers
+  lines 15-22: unrolled x2 (32 iterations, 5 registers renamed, 3 repeated address instructions removed)
+    not read after the loop, so they now end differently: x14 x15
+  ...
+  original            388 cycles
+  suggested           244 cycles   -37.1%
+  result          identical to the original on the single-cycle processor
 ```
 
 Exit codes: `0` success, `1` the program cannot be read or assembled (or bad options), `2` the

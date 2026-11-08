@@ -29,6 +29,10 @@ struct OptimizeOptions
     /// no unrolling. Unrolling changes the code size, so it is off unless asked for.
     int unrollFactor{1};
 
+    /// When unrolling, let registers the program never reads after a loop end with different
+    /// values, so the repeated address arithmetic can be removed (see loop_unroller.h).
+    bool allowDeadRegisterChanges{false};
+
     /// Extra cycles to plan for on every load, for the simulator's non-blocking memory-latency
     /// model (see cost_model.h). 0 plans for loads that always hit.
     int loadExtraLatency{0};

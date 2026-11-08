@@ -3,7 +3,8 @@
  * @brief kites-bench: measures the reordering optimizer on the benchmark programs.
  *
  * For every benchmark, pipeline variant and memory setting it runs the original program, the
- * reordered program, and the reordered and unrolled program on the simulator, checks that each
+ * reordered program, the reordered and unrolled program, and the unrolled program with its repeated
+ * address arithmetic folded away on the simulator, checks that each
  * computes exactly what the original computes on the single-cycle processor, and writes the
  * measured cycle counts as a Markdown table and as CSV.
  *
@@ -69,12 +70,16 @@ const std::vector<VariantInfo> kVariants = {
     {"NH_F", PipelineVariant::NH_F, ProcessorType::RV5Stage_NH_F},
     {"H_F", PipelineVariant::H_F, ProcessorType::RV5Stage_H_F}};
 
-std::vector<unsigned> renamedRegisters(const OptimizeResult &result)
+// Registers a result may legitimately leave different: the ones unrolling took into use, and with
+// allowDeadRegisterChanges the ones nothing reads after their loop.
+std::vector<unsigned> notCompared(const OptimizeResult &result)
 {
     std::vector<unsigned> registers;
     for (const LoopReport &loop : result.loops)
     {
         registers.insert(registers.end(), loop.renamedTo.begin(), loop.renamedTo.end());
+        registers.insert(registers.end(), loop.changedDeadRegisters.begin(),
+                         loop.changedDeadRegisters.end());
     }
     return registers;
 }
@@ -87,6 +92,7 @@ struct Measurement
     unsigned original{0};
     unsigned reordered{0};
     unsigned unrolled{0};
+    unsigned folded{0};
     int unrolledLoops{0};
     bool correct{true};
 };
@@ -117,13 +123,18 @@ void writeMarkdown(const std::filesystem::path &path, const std::vector<Measurem
            "(on NH_NF and NH_F padded with just the NOPs it needs to be correct). **Reordered** "
            "is the optimizer's suggestion. **+ unrolled** also unrolls counted loops by up to "
            "x" << kUnrollFactor
-        << ". Every version was checked to compute exactly what the original computes.\n";
+        << ", keeping every register's final value. **+ folded** also lets registers that "
+           "nothing reads after a loop end differently, so the unrolled copies share one address "
+           "computation (`--only-live-registers`). Every version was checked to compute exactly "
+           "what the original computes; registers that only unrolling uses, and for **+ folded** "
+           "the registers nothing reads after their loop, are not compared.\n";
 
     for (const MemorySetting &setting : kMemorySettings)
     {
         out << "\n## " << setting.title << "\n\n" << setting.description << "\n\n";
-        out << "| Benchmark | Variant | Original | Reordered | Change | + unrolled | Change |\n"
-            << "|---|---|---:|---:|---:|---:|---:|\n";
+        out << "| Benchmark | Variant | Original | Reordered | Change | + unrolled | Change | "
+               "+ folded | Change |\n"
+            << "|---|---|---:|---:|---:|---:|---:|---:|---:|\n";
         for (const Measurement &m : results)
         {
             if (m.memory != setting.title)
@@ -132,7 +143,8 @@ void writeMarkdown(const std::filesystem::path &path, const std::vector<Measurem
             }
             out << "| " << m.benchmark << " | " << m.variant << " | " << m.original << " | "
                 << m.reordered << " | " << percent(m.original, m.reordered) << " | " << m.unrolled
-                << " | " << percent(m.original, m.unrolled) << " |\n";
+                << " | " << percent(m.original, m.unrolled) << " | " << m.folded << " | "
+                << percent(m.original, m.folded) << " |\n";
         }
     }
 }
@@ -141,11 +153,11 @@ void writeCsv(const std::filesystem::path &path, const std::vector<Measurement> 
 {
     std::ofstream out(path);
     out << "benchmark,memory,variant,original_cycles,reordered_cycles,unrolled_cycles,"
-           "unrolled_loops,correct\n";
+           "folded_cycles,unrolled_loops,correct\n";
     for (const Measurement &m : results)
     {
         out << m.benchmark << "," << m.memory << "," << m.variant << "," << m.original << ","
-            << m.reordered << "," << m.unrolled << "," << m.unrolledLoops << ","
+            << m.reordered << "," << m.unrolled << "," << m.folded << "," << m.unrolledLoops << ","
             << (m.correct ? "yes" : "no") << "\n";
     }
 }
@@ -227,6 +239,8 @@ int main(int argc, char *argv[])
                 const OptimizeResult reordered = optimizeSource(original, options);
                 options.unrollFactor = kUnrollFactor;
                 const OptimizeResult unrolled = optimizeSource(original, options);
+                options.allowDeadRegisterChanges = true;
+                const OptimizeResult folded = optimizeSource(original, options);
                 for (const LoopReport &loop : unrolled.loops)
                 {
                     m.unrolledLoops += loop.unrolled ? 1 : 0;
@@ -237,18 +251,21 @@ int main(int argc, char *argv[])
                     runProgram(reordered.source, info.processor, setting.setup);
                 const ProgramRun afterUnroll =
                     runProgram(unrolled.source, info.processor, setting.setup);
+                const ProgramRun afterFold = runProgram(folded.source, info.processor, setting.setup);
                 m.original = before.cycles;
                 m.reordered = afterReorder.cycles;
                 m.unrolled = afterUnroll.cycles;
-                m.correct =
-                    sameResult(reference, before.state) &&
-                    sameResult(reference, afterReorder.state, renamedRegisters(reordered)) &&
-                    sameResult(reference, afterUnroll.state, renamedRegisters(unrolled));
+                m.folded = afterFold.cycles;
+                m.correct = sameResult(reference, before.state) &&
+                            sameResult(reference, afterReorder.state, notCompared(reordered)) &&
+                            sameResult(reference, afterUnroll.state, notCompared(unrolled)) &&
+                            sameResult(reference, afterFold.state, notCompared(folded));
                 allCorrect = allCorrect && m.correct;
 
                 std::cerr << std::left << std::setw(13) << setting.title << std::setw(18) << name
                           << std::setw(6) << info.name << std::right << std::setw(6) << m.original
                           << std::setw(6) << m.reordered << std::setw(6) << m.unrolled
+                          << std::setw(6) << m.folded
                           << (m.correct ? "" : "   WRONG RESULT") << "\n";
                 results.push_back(m);
             }

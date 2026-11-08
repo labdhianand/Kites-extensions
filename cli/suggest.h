@@ -20,6 +20,9 @@ struct SuggestOptions
     /// Unroll counted loops by up to this factor (1 = no unrolling).
     int unrollFactor{1};
 
+    /// Only memory and the registers read after each loop must match (--only-live-registers).
+    bool allowDeadRegisterChanges{false};
+
     /// Extra cycles per load to plan for; -1 picks a default for the memory setup.
     int plannedLatency{-1};
 
