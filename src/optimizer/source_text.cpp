@@ -4,6 +4,7 @@
  */
 #include "optimizer/source_text.h"
 
+#include <algorithm>
 #include <cctype>
 #include <regex>
 
@@ -80,6 +81,121 @@ std::string rightTrimmed(std::string text)
     const size_t end = text.find_last_not_of(" \t");
     text.erase(end == std::string::npos ? 0 : end + 1);
     return text;
+}
+
+namespace
+{
+// One step of an edit script: a line kept (' '), removed ('-') or added ('+').
+struct DiffStep
+{
+    char kind;
+    size_t beforeIndex; ///< valid for ' ' and '-'
+    size_t afterIndex;  ///< valid for ' ' and '+'
+};
+
+// The shortest edit script, from a longest common subsequence of lines.
+std::vector<DiffStep> diffSteps(const std::vector<std::string> &a, const std::vector<std::string> &b)
+{
+    const size_t n = a.size();
+    const size_t m = b.size();
+    // common[i][j]: length of the longest common subsequence of a[i..] and b[j..].
+    std::vector<std::vector<size_t>> common(n + 1, std::vector<size_t>(m + 1, 0));
+    for (size_t i = n; i-- > 0;)
+    {
+        for (size_t j = m; j-- > 0;)
+        {
+            common[i][j] = a[i] == b[j] ? common[i + 1][j + 1] + 1
+                                        : std::max(common[i + 1][j], common[i][j + 1]);
+        }
+    }
+
+    std::vector<DiffStep> steps;
+    size_t i = 0;
+    size_t j = 0;
+    while (i < n || j < m)
+    {
+        if (i < n && j < m && a[i] == b[j])
+        {
+            steps.push_back({' ', i++, j++});
+        }
+        else if (i < n && (j == m || common[i + 1][j] >= common[i][j + 1]))
+        {
+            steps.push_back({'-', i++, j}); // removals before additions, as diff tools show them
+        }
+        else
+        {
+            steps.push_back({'+', i, j++});
+        }
+    }
+    return steps;
+}
+} // namespace
+
+std::string unifiedDiff(const std::string &before, const std::string &after,
+                        const std::string &beforeName, const std::string &afterName, int context)
+{
+    const std::vector<std::string> a = splitSource(before).lines;
+    const std::vector<std::string> b = splitSource(after).lines;
+    const std::vector<DiffStep> steps = diffSteps(a, b);
+    const size_t contextLines = static_cast<size_t>(std::max(context, 0));
+
+    std::string result;
+    size_t s = 0;
+    while (s < steps.size())
+    {
+        // Find the next change, then extend the hunk while changes are close together.
+        while (s < steps.size() && steps[s].kind == ' ')
+        {
+            ++s;
+        }
+        if (s == steps.size())
+        {
+            break;
+        }
+        const size_t hunkStart = s >= contextLines ? s - contextLines : 0;
+        size_t hunkEnd = s;
+        size_t unchangedRun = 0;
+        for (size_t t = s; t < steps.size(); ++t)
+        {
+            if (steps[t].kind == ' ')
+            {
+                if (++unchangedRun > 2 * contextLines)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                unchangedRun = 0;
+                hunkEnd = t;
+            }
+        }
+        const size_t hunkStop = std::min(steps.size(), hunkEnd + 1 + contextLines);
+
+        size_t beforeCount = 0;
+        size_t afterCount = 0;
+        for (size_t t = hunkStart; t < hunkStop; ++t)
+        {
+            beforeCount += steps[t].kind != '+' ? 1 : 0;
+            afterCount += steps[t].kind != '-' ? 1 : 0;
+        }
+        if (result.empty())
+        {
+            result += "--- " + beforeName + "\n+++ " + afterName + "\n";
+        }
+        result += "@@ -" + std::to_string(steps[hunkStart].beforeIndex + 1) + "," +
+                  std::to_string(beforeCount) + " +" +
+                  std::to_string(steps[hunkStart].afterIndex + 1) + "," +
+                  std::to_string(afterCount) + " @@\n";
+        for (size_t t = hunkStart; t < hunkStop; ++t)
+        {
+            const std::string &line =
+                steps[t].kind == '+' ? b[steps[t].afterIndex] : a[steps[t].beforeIndex];
+            result += std::string(1, steps[t].kind) + line + "\n";
+        }
+        s = hunkStop;
+    }
+    return result;
 }
 
 namespace
