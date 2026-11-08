@@ -86,6 +86,7 @@ public:
     QColor getEditorForegroundColor() const;
     QColor getEditorMutedForegroundColor() const;
     QColor getEditorErrorColor() const; // for squiggly diagnostics; reuses the theme's cacheMiss red
+    QColor getEditorSuccessColor() const; // for added lines and good results; the cacheHit green
 
     // Validates, copies into the user theme directory and installs the theme.
     // Returns true on success; on failure `errorOut` is populated.

@@ -31,6 +31,9 @@ public:
     void setErrorLinesFromFile(const std::filesystem::path &filepath);
     std::string getRawText();
     void setRawText(const QString &text);
+    /// Replaces the whole program as one undoable edit (Ctrl+Z in the editor brings the old text
+    /// back). Returns false, changing nothing, while a run has the editor locked.
+    bool replaceRawText(const QString &text);
     void resetErrorLines();
     void highlightLines(const std::vector<std::pair<int,std::string>> &editorLines, 
       const std::vector<std::pair<int,std::string>> &disassemblyLines);

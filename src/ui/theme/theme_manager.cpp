@@ -145,6 +145,12 @@ QColor ThemeManager::getEditorErrorColor() const
     return theme ? theme->cacheMissColor : QColor("#f7768e");
 }
 
+QColor ThemeManager::getEditorSuccessColor() const
+{
+    const ThemeData *theme = editorTheme();
+    return theme ? theme->cacheHitColor : QColor("#9ece6a");
+}
+
 void ThemeManager::applyTheme(const ThemeData &theme)
 {
     QApplication::setPalette(theme.palette);
