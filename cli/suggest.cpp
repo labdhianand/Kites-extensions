@@ -4,8 +4,7 @@
  */
 #include "suggest.h"
 
-#include "benchmarking/program_runner.h"
-#include "optimizer/optimizer.h"
+#include "benchmarking/suggestion.h"
 #include "optimizer/source_text.h"
 
 #include <filesystem>
@@ -20,45 +19,12 @@ namespace Kites
 {
 namespace
 {
-using optimizer::PipelineVariant;
-
-struct VariantDescription
-{
-    PipelineVariant variant;
-    const char *description;
-};
-
-VariantDescription describeVariant(ProcessorType type)
-{
-    switch (type)
-    {
-    case ProcessorType::RV5Stage_NH_NF:
-        return {PipelineVariant::NH_NF, "no hazard detection, no forwarding"};
-    case ProcessorType::RV5Stage_H_NF:
-        return {PipelineVariant::H_NF, "hazard detection, no forwarding"};
-    case ProcessorType::RV5Stage_NH_F:
-        return {PipelineVariant::NH_F, "no hazard detection, forwarding"};
-    default:
-        return {PipelineVariant::H_F, "hazard detection, forwarding"};
-    }
-}
-
 std::string percentChange(unsigned before, unsigned after)
 {
     std::ostringstream out;
     const double change = 100.0 * (static_cast<double>(after) - before) / before;
     out << std::fixed << std::setprecision(1) << (change > 0 ? "+" : "") << change << "%";
     return out.str();
-}
-
-int countLines(const std::string &text, const std::string &needle)
-{
-    int count = 0;
-    for (const std::string &line : optimizer::splitSource(text).lines)
-    {
-        count += line.find(needle) != std::string::npos ? 1 : 0;
-    }
-    return count;
 }
 
 void printLoops(const std::vector<optimizer::LoopReport> &loops)
@@ -118,7 +84,7 @@ void printBlocks(const optimizer::OptimizeResult &result)
 
 int RunSuggest(const SuggestOptions &options)
 {
-    if (options.processor == ProcessorType::RVSS || options.processor == ProcessorType::ProcessorTypeCount)
+    if (!benchmarking::canSuggestFor(options.processor))
     {
         std::cerr << "Error: --suggest needs a pipelined processor model "
                      "(--vm rv5-nh-nf | rv5-h-nf | rv5-nh-f | rv5-h-f).\n";
@@ -133,58 +99,43 @@ int RunSuggest(const SuggestOptions &options)
     }
     std::stringstream buffer;
     buffer << file.rdbuf();
-    const std::string source = buffer.str();
 
-    const VariantDescription variant = describeVariant(options.processor);
-    const benchmarking::MemorySetup memory =
+    benchmarking::SuggestionRequest request;
+    request.source = buffer.str();
+    request.processor = options.processor;
+    request.memory =
         options.coldCache ? benchmarking::MemorySetup::ColdCache : benchmarking::MemorySetup::Ideal;
-    const int plannedLatency =
-        options.plannedLatency >= 0 ? options.plannedLatency
-                                    : (options.coldCache ? benchmarking::kColdCacheL2Latency : 0);
-    const bool detectsHazards =
-        variant.variant == PipelineVariant::H_NF || variant.variant == PipelineVariant::H_F;
+    request.unrollFactor = options.unrollFactor;
+    request.plannedLatency = options.plannedLatency;
+    request.measure = options.verify;
 
-    optimizer::OptimizeOptions optimizeOptions;
-    optimizeOptions.variant = variant.variant;
-    optimizeOptions.loadExtraLatency = plannedLatency;
-
-    std::string baseline = source;
-    optimizer::OptimizeResult result;
+    benchmarking::Suggestion suggestion;
     try
     {
-        // Without hazard detection a program is only correct with enough padding, so start from
-        // the minimally padded program; the suggestion then redoes the padding where it is needed.
-        if (!detectsHazards)
-        {
-            optimizer::OptimizeOptions pad = optimizeOptions;
-            pad.padOnly = true;
-            baseline = optimizer::optimizeSource(source, pad).source;
-        }
-        optimizeOptions.dropNops = true;
-        optimizeOptions.unrollFactor = options.unrollFactor;
-        result = optimizer::optimizeSource(baseline, optimizeOptions);
+        suggestion = benchmarking::makeSuggestion(request);
     }
     catch (const std::exception &error)
     {
         std::cerr << "Error: " << error.what() << "\n";
         return 1;
     }
+    const optimizer::OptimizeResult &result = suggestion.result;
 
     const std::string name = std::filesystem::path(options.assemblyFile).filename().string();
     std::cout << "Reordering suggestion for " << name << " on " << options.processorName << " ("
-              << variant.description << ")\n";
-    std::cout << "Planned load latency: +" << plannedLatency << " cycles";
+              << benchmarking::describe(options.processor) << ")\n";
+    std::cout << "Planned load latency: +" << suggestion.plannedLatency << " cycles";
     if (options.unrollFactor > 1)
     {
         std::cout << ", loops unrolled up to x" << options.unrollFactor;
     }
     std::cout << "\n";
-    if (baseline != source)
+    if (suggestion.baseline != request.source)
     {
         std::cout << "\nThis pipeline does not stall on hazards, so the program was first padded to "
                      "compute the right result ("
-                  << countLines(baseline, "# padding") << " NOPs added). The suggestion is "
-                  << "compared with that padded program.\n";
+                  << suggestion.paddingAdded << " NOPs added). The suggestion is compared with "
+                  << "that padded program.\n";
     }
 
     printLoops(result.loops);
@@ -193,47 +144,36 @@ int RunSuggest(const SuggestOptions &options)
     if (!result.changed)
     {
         std::cout << "\nNo better order found"
-                  << (baseline != source ? "; only the padding is needed.\n" : ".\n");
+                  << (suggestion.baseline != request.source ? "; only the padding is needed.\n"
+                                                             : ".\n");
     }
-    if (result.source != source)
+    if (result.source != request.source)
     {
-        std::cout << "\n"
-                  << optimizer::unifiedDiff(source, result.source, name, "suggested");
+        std::cout << "\n" << optimizer::unifiedDiff(request.source, result.source, name, "suggested");
     }
 
     int exitCode = 0;
-    if (options.verify)
+    if (suggestion.measured)
     {
-        std::vector<unsigned> renamed;
-        for (const optimizer::LoopReport &loop : result.loops)
-        {
-            renamed.insert(renamed.end(), loop.renamedTo.begin(), loop.renamedTo.end());
-        }
-        const benchmarking::ProgramRun reference =
-            benchmarking::runProgram(source, ProcessorType::RVSS);
-        const benchmarking::ProgramRun before =
-            benchmarking::runProgram(baseline, options.processor, memory);
-        const benchmarking::ProgramRun after =
-            benchmarking::runProgram(result.source, options.processor, memory);
-        const bool beforeCorrect = benchmarking::sameResult(reference.state, before.state);
-        const bool afterCorrect = benchmarking::sameResult(reference.state, after.state, renamed);
-
         std::cout << "\nMeasured on " << options.processorName << " with "
-                  << benchmarking::describe(memory) << ":\n";
-        std::cout << "  " << (baseline != source ? "padded original " : "original        ")
-                  << std::setw(7) << before.cycles << " cycles"
-                  << (beforeCorrect ? "" : "   (computes a different result!)") << "\n";
-        std::cout << "  suggested       " << std::setw(7) << after.cycles << " cycles   "
-                  << percentChange(before.cycles, after.cycles) << "\n";
+                  << benchmarking::describe(request.memory) << ":\n";
+        std::cout << "  "
+                  << (suggestion.baseline != request.source ? "padded original " : "original        ")
+                  << std::setw(7) << suggestion.baselineCycles << " cycles"
+                  << (suggestion.baselineCorrect ? "" : "   (computes a different result!)") << "\n";
+        std::cout << "  suggested       " << std::setw(7) << suggestion.suggestionCycles
+                  << " cycles   "
+                  << percentChange(suggestion.baselineCycles, suggestion.suggestionCycles) << "\n";
         std::cout << "  result          "
-                  << (afterCorrect ? "identical to the original on the single-cycle processor"
-                                   : "DIFFERENT from the original")
+                  << (suggestion.suggestionCorrect
+                          ? "identical to the original on the single-cycle processor"
+                          : "DIFFERENT from the original")
                   << "\n";
-        if (!renamed.empty())
+        if (!suggestion.renamedRegisters.empty())
         {
             std::cout << "                  (registers the original never used are not compared)\n";
         }
-        if (!afterCorrect)
+        if (!suggestion.suggestionCorrect)
         {
             exitCode = 2;
         }

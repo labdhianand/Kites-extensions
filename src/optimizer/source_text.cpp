@@ -131,6 +131,23 @@ std::vector<DiffStep> diffSteps(const std::vector<std::string> &a, const std::ve
 }
 } // namespace
 
+LineChanges changedLines(const std::string &before, const std::string &after)
+{
+    LineChanges changes;
+    for (const DiffStep &step : diffSteps(splitSource(before).lines, splitSource(after).lines))
+    {
+        if (step.kind == '-')
+        {
+            changes.removedLines.push_back(static_cast<int>(step.beforeIndex) + 1);
+        }
+        else if (step.kind == '+')
+        {
+            changes.addedLines.push_back(static_cast<int>(step.afterIndex) + 1);
+        }
+    }
+    return changes;
+}
+
 std::string unifiedDiff(const std::string &before, const std::string &after,
                         const std::string &beforeName, const std::string &afterName, int context)
 {
