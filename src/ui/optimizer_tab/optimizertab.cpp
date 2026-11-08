@@ -1,6 +1,7 @@
 #include "optimizertab.h"
 
 #include "custom_pseudo_manager/custom_pseudo_manager.h"
+#include "optimizer/loop_unroller.h"
 #include "optimizer/source_text.h"
 #include "optimizer_editor.h"
 #include "ui/theme/theme_manager.h"
@@ -425,6 +426,20 @@ void OptimizerTab::suggestionFinished()
                                       .arg(loop.firstLine)
                                       .arg(loop.lastLine)
                                       .arg(QString::fromStdString(loop.reason)));
+        QStringList saved;
+        for (unsigned reg : loop.renamedTo)
+        {
+            if (optimizer::isCalleeSaved(reg))
+            {
+                saved << QString("x%1").arg(reg);
+            }
+        }
+        if (!saved.isEmpty())
+        {
+            notes << QString("No temporary register was free, so callee-saved %1 is used: inside a "
+                             "function, save and restore it.")
+                         .arg(saved.join(", "));
+        }
     }
     if (!leftAlone.isEmpty())
     {

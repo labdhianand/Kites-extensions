@@ -57,5 +57,9 @@ struct UnrollResult
  */
 [[nodiscard]] UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options);
 
+/// True for the registers a function must preserve for its caller (s0-s11: x8, x9, x18-x27).
+/// The unroller uses them only when no other register is free.
+[[nodiscard]] bool isCalleeSaved(unsigned reg);
+
 } // namespace optimizer
 } // namespace Kites

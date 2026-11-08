@@ -5,6 +5,7 @@
 #include "suggest.h"
 
 #include "benchmarking/suggestion.h"
+#include "optimizer/loop_unroller.h"
 #include "optimizer/source_text.h"
 
 #include <filesystem>
@@ -45,6 +46,19 @@ void printLoops(const std::vector<optimizer::LoopReport> &loops)
                 std::cout << ", " << loop.renamedTo.size() << " registers renamed";
             }
             std::cout << ")\n";
+            std::string saved;
+            for (unsigned reg : loop.renamedTo)
+            {
+                if (optimizer::isCalleeSaved(reg))
+                {
+                    saved += (saved.empty() ? "x" : ", x") + std::to_string(reg);
+                }
+            }
+            if (!saved.empty())
+            {
+                std::cout << "    note: no temporary register was free, so callee-saved " << saved
+                          << " is used; inside a function, save and restore it\n";
+            }
         }
         else
         {

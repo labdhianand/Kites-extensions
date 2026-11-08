@@ -24,8 +24,12 @@ namespace
 {
 constexpr long kMaxSimulatedIterations = 100000;
 
-// Registers x0-x4 (zero, ra, sp, gp, tp) have special roles and are never handed out.
-constexpr unsigned kFirstAllocatableRegister = 5;
+// The order spare registers are handed out in, following the RISC-V calling convention: the
+// temporaries first (t3-t6, t0-t2), then the argument registers (a7-a0), and the callee-saved
+// registers (s11-s1, then s0, the frame pointer) only when nothing else is free, since code inside a
+// function would have to save those. x0-x4 (zero, ra, sp, gp, tp) are never handed out.
+constexpr unsigned kAllocationOrder[] = {31, 30, 29, 28, 7,  6,  5,  17, 16, 15, 14, 13, 12, 11,
+                                         10, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 9,  8};
 
 bool usesFloatingPoint(const InstrInfo &info)
 {
@@ -203,6 +207,11 @@ void checkAssembles(const std::string &source, const char *what)
 }
 } // namespace
 
+bool isCalleeSaved(unsigned reg)
+{
+    return reg == 8 || reg == 9 || (reg >= 18 && reg <= 27);
+}
+
 UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options)
 {
     std::istringstream stream(source);
@@ -222,7 +231,7 @@ UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options
     const std::bitset<32> usedRegisters = registersUsedAnywhere(model);
 
     std::vector<unsigned> freeRegisters;
-    for (unsigned r = 31; r >= kFirstAllocatableRegister; --r)
+    for (unsigned r : kAllocationOrder)
     {
         if (!usedRegisters[r])
         {
