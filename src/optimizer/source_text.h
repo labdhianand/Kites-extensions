@@ -49,6 +49,16 @@ struct SplitLine
                                       const std::string &beforeName, const std::string &afterName,
                                       int context = 2);
 
+/// The lines of `before` that are not in `after`, and the lines of `after` that are new (1-based),
+/// matched the same way as unifiedDiff.
+struct LineChanges
+{
+    std::vector<int> removedLines;
+    std::vector<int> addedLines;
+};
+
+[[nodiscard]] LineChanges changedLines(const std::string &before, const std::string &after);
+
 /// Replaces whole register names in the instruction part of `body` (not in a trailing comment).
 /// Both canonical (x5) and ABI (t0) names are recognised; replacements are written canonically.
 [[nodiscard]] std::string renameRegisters(const std::string &body,
