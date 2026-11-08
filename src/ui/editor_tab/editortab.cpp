@@ -135,6 +135,24 @@ void EditorTab::setRawText(const QString &text)
     m_editor->setPlainText(text);
 }
 
+bool EditorTab::replaceRawText(const QString &text)
+{
+    if (m_editor->isReadOnly())
+    {
+        return false;
+    }
+    if (m_editor->toPlainText() == text)
+    {
+        return true;
+    }
+    QTextCursor cursor(m_editor->document());
+    cursor.beginEditBlock();
+    cursor.select(QTextCursor::Document);
+    cursor.insertText(text);
+    cursor.endEditBlock();
+    return true;
+}
+
 void EditorTab::resetErrorLines()
 {
     m_editor->setExtraSelections({});

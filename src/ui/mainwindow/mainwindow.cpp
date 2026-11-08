@@ -10,6 +10,7 @@
 #include "ui/dialogs/settings_dialog.h"
 #include "ui/editor_tab/editortab.h"
 #include "ui/memory_tab/memorytab.h"
+#include "ui/optimizer_tab/optimizertab.h"
 #include "ui/processor_tab/processortab.h"
 #include "ui/profiler_tab/profilertab.h"
 #include "ui/theme/icon_manager.h"
@@ -23,6 +24,7 @@
 #include <QWidgetAction>
 #include <QSplitter>
 #include <QMessageBox>
+#include <algorithm>
 
 namespace Kites
 {
@@ -61,7 +63,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     mainLayout->setContentsMargins(0, 0, 0, 0);
     splitter->addWidget(m_stackedTabs);
     splitter->addWidget(m_registerContainer);
-    splitter->widget(1)->setMaximumWidth(350);
+    // The register panel keeps its width when the window grows, but can be dragged wider.
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 0);
+    splitter->setCollapsible(0, false);
+    splitter->setSizes({1000, 330});
 
     // outer splitter makes the sidebar width user-adjustable (Zed-style)
     QSplitter *outerSplitter = new QSplitter(Qt::Horizontal, this);
@@ -70,7 +76,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     outerSplitter->setCollapsible(1, false);
     outerSplitter->setStretchFactor(0, 0);
     outerSplitter->setStretchFactor(1, 1);
-    outerSplitter->setSizes({m_sidebar->sizeHintForColumn(0) + 24, 1000});
+    outerSplitter->setSizes({sidebarWidth(), 1000});
 
     mainLayout->addWidget(outerSplitter);
 
@@ -260,6 +266,22 @@ void MainWindow::setUpToolBar()
     connect(redoAction, &QAction::triggered, this, [this]() { m_processorManager->redo(); });
 }
 
+int MainWindow::sidebarWidth() const
+{
+    // Wide enough for the longest label next to its icon. The item padding and margins come
+    // from the stylesheet (8px 6px padding, 4px side margins), which sizeHintForColumn does not
+    // see before the window is shown.
+    int widest = 0;
+    for (int row = 0; row < m_sidebar->count(); ++row)
+    {
+        widest = std::max(widest, m_sidebar->fontMetrics().horizontalAdvance(
+                                      m_sidebar->item(row)->text()));
+    }
+    const int itemChrome = 2 * 6 + 2 * 4; // padding + margins on both sides
+    const int iconAndGap = m_sidebar->iconSize().width() + 10;
+    return widest + iconAndGap + itemChrome + 16; // and a little room for the frame
+}
+
 void MainWindow::setUpSidebar()
 {
     auto &iconManager = IconManager::getInstance();
@@ -269,8 +291,12 @@ void MainWindow::setUpSidebar()
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Cache), "Cache"));
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Compiler), "Compiler"));
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Profiler), "Profiler"));
+    m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Optimizer), "Optimizer"));
     m_sidebar->setIconSize(QSize(20, 20));
-    m_sidebar->setMinimumWidth(48);
+    // Never squeeze the labels away: a wide page should not eat into the sidebar.
+    m_sidebar->setMinimumWidth(sidebarWidth());
+    m_sidebar->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_sidebar->setTextElideMode(Qt::ElideRight);
     m_sidebar->setCurrentRow(0);
     // m_sidebar->setFocusPolicy(Qt::ClickFocus);
 
@@ -397,6 +423,32 @@ void MainWindow::setUpTabs()
     m_tabs[TabIndex::CacheTabIndex]     = new CacheTab(this, m_processorManager->getMemoryController());
     m_tabs[TabIndex::CompilerTabIndex]  = new CompilerTab(this);
     m_tabs[TabIndex::ProfilerTabIndex]  = new ProfilerTab(this, m_processorManager->getProfiler());
+    auto *optimizerTab                  = new OptimizerTab(this);
+    m_tabs[TabIndex::OptimizerTabIndex] = optimizerTab;
+    optimizerTab->setSourceProvider(
+        [this]()
+        {
+            auto *editor = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+            return editor ? QString::fromStdString(editor->getRawText()) : QString();
+        });
+    optimizerTab->setSourceSink(
+        [this](const QString &program)
+        {
+            auto *editor = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+            return editor && editor->replaceRawText(program);
+        });
+    optimizerTab->setApplyHandler(
+        [this](const QString &program)
+        {
+            auto *editor = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+            if (!editor || !editor->replaceRawText(program))
+            {
+                return false;
+            }
+            m_sidebar->setCurrentRow(TabIndex::EditorTabIndex);
+            return true;
+        });
+    optimizerTab->setProcessor(m_processorManager->getProcessorType());
     // a little experiment
     connect(this, &MainWindow::processorChangedSignal,
             dynamic_cast<ProcessorTab *>(m_tabs[TabIndex::ProcessorTabIndex]),
@@ -408,6 +460,7 @@ void MainWindow::setUpTabs()
     m_stackedTabs->addWidget(m_tabs[TabIndex::CacheTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::CompilerTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::ProfilerTabIndex]);
+    m_stackedTabs->addWidget(m_tabs[TabIndex::OptimizerTabIndex]);
 }
 
 bool MainWindow::tryParseAndLoadProgram()
@@ -495,6 +548,10 @@ void MainWindow::processorChanged(const ProcessorType &vmType)
     if (cacheTab)
     {
         cacheTab->changeMemoryController(m_processorManager->getMemoryController());
+    }
+    if (auto *optimizerTab = dynamic_cast<OptimizerTab *>(m_tabs[TabIndex::OptimizerTabIndex]))
+    {
+        optimizerTab->setProcessor(vmType);
     }
     emit processorChangedSignal();
 
@@ -590,7 +647,8 @@ void MainWindow::themeChangedSlot([[maybe_unused]] const QString &themeId)
 
     // sidebar icons
     static const std::array<Icon, toIndex(TabIndex::TabCount)> sidebarIcons = {
-        Icon::Editor, Icon::Memory, Icon::Processor, Icon::Cache, Icon::Compiler, Icon::Profiler};
+        Icon::Editor, Icon::Memory, Icon::Processor, Icon::Cache, Icon::Compiler, Icon::Profiler,
+        Icon::Optimizer};
     for (int row = 0; row < m_sidebar->count(); ++row)
     {
         if (row < static_cast<int>(sidebarIcons.size()))

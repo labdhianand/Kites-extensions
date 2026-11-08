@@ -33,6 +33,7 @@ class MainWindow : public QMainWindow
         CacheTabIndex,
         CompilerTabIndex,
         ProfilerTabIndex,
+        OptimizerTabIndex,
         TabCount
     };
 
@@ -52,6 +53,7 @@ private:
     void setUpStatusBar();
     void setUpToolBar();
     void setUpSidebar();
+    int sidebarWidth() const;
     void setUpMenubar();
     void setUpTabs();
     void toggleTheme(const QString &themeId);

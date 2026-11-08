@@ -58,6 +58,7 @@ void IconManager::setUpIconPaths()
     m_iconPaths[toIndex(Icon::Cache)]     = ":/icons/cache.svg";
     m_iconPaths[toIndex(Icon::Compiler)]  = ":/icons/compiler.svg";
     m_iconPaths[toIndex(Icon::Profiler)]  = ":/icons/profiler.svg";
+    m_iconPaths[toIndex(Icon::Optimizer)] = ":/icons/optimizer.svg";
     m_iconPaths[toIndex(Icon::Open)]      = ":/icons/open.svg";
     m_iconPaths[toIndex(Icon::Save)]      = ":/icons/save.svg";
     m_iconPaths[toIndex(Icon::Settings)]  = ":/icons/settings.svg";
