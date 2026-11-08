@@ -87,6 +87,71 @@ adds a `Memory -> .../vm_state/memory_dump.json` line and writes both
 requested regions (4 rows starting at address `0x0`, then 2 rows starting at
 `0x100`) to that file.
 
+## Reordering suggestions (`--suggest`)
+
+```
+kites-cli <assembly-file> --suggest [--vm <rv5-...>] [--unroll <n>] [--cold-cache]
+          [--plan-latency <n>] [--out <file>] [--no-verify]
+```
+
+Suggests a better instruction order for one of the pipelined processor models, shows it as a
+diff against your program, and runs both on the simulator to measure the difference and check
+that the suggestion computes exactly the same result.
+
+| Argument | Description |
+|---|---|
+| `--suggest` | Turn on suggestion mode. `--vm` then defaults to `rv5-h-f`; `rvss` is not accepted (a single-cycle processor has nothing to reorder for). |
+| `--unroll <n>` | Also unroll counted loops by up to `n`, when that is provably exact (fixed trip count divisible by the factor). Off by default, because it changes the code size. |
+| `--cold-cache` | Measure with the cache-latency model (L1 128 B, L2 2 KB; +0 / +4 / +20 cycles per L1 hit / L2 hit / memory access) instead of ideal memory. |
+| `--plan-latency <n>` | Extra cycles per load the optimizer should plan for. Defaults to 0, or 4 (the L2 latency) with `--cold-cache`. |
+| `--out <file>` | Write the suggested program to `<file>`. |
+| `--no-verify` | Only print the suggestion; do not run anything. |
+
+Only the order of instructions inside basic blocks changes (plus unrolling when asked for), so
+labels, branches and jumps keep their meaning. On `rv5-nh-nf` and `rv5-nh-f`, which do not stall
+on hazards, the program is first padded with just the NOPs it needs to compute the right result;
+the suggestion is compared with that padded program and contains whatever padding it needs
+itself. Floating-point code is left alone on the pipelines.
+
+Example, on `benchmarks/vector_add.s`:
+
+```
+$ kites-cli benchmarks/vector_add.s --suggest --vm rv5-h-f --unroll 2
+Reordering suggestion for vector_add.s on rv5-h-f (hazard detection, forwarding)
+Planned load latency: +0 cycles, loops unrolled up to x2
+
+Loops:
+  lines 15-22: unrolled x2 (32 iterations, 5 registers renamed)
+
+Basic blocks: 2, reordered: 1
+  lines 15-30: 17 -> 15 slots per pass
+  (line numbers refer to the program after unrolling)
+
+--- vector_add.s
++++ suggested
+@@ -13,9 +13,17 @@
+     addi x12, x0, 0          # i
+ loop:
++    # loop unrolled x2
++    slli x31, x12, 2
++    addi x12, x12, 1
+     slli x14, x12, 2
+ ...
+
+Measured on rv5-h-f with ideal memory (every access takes one cycle):
+  original            388 cycles
+  suggested           292 cycles   -24.7%
+  result          identical to the original on the single-cycle processor
+                  (registers the original never used are not compared)
+```
+
+Exit codes: `0` success, `1` the program cannot be read or assembled (or bad options), `2` the
+suggestion computed a different result on the simulator (this should never happen; please report
+it).
+
+For measurements across many programs and all four pipelines, see `kites-bench` and
+[BENCHMARKS.md](BENCHMARKS.md).
+
 ## Program output during the run
 
 Programs that execute `ecall` for I/O print directly to the CLI's stdout
