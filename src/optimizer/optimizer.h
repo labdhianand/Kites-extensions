@@ -29,8 +29,9 @@ struct OptimizeOptions
     /// no unrolling. Unrolling changes the code size, so it is off unless asked for.
     int unrollFactor{1};
 
-    /// When unrolling, let registers the program never reads after a loop end with different
-    /// values, so the repeated address arithmetic can be removed (see loop_unroller.h).
+    /// Let registers the program never reads after a loop end with different values, so repeated
+    /// address arithmetic can be removed and indexed loops can step a pointer instead (see
+    /// loop_unroller.h). Pointers are also introduced, keeping every register, when unrolling.
     bool allowDeadRegisterChanges{false};
 
     /// Extra cycles to plan for on every load, for the simulator's non-blocking memory-latency
@@ -64,6 +65,9 @@ struct OptimizeResult
     /// Loops found, and whether they were unrolled. Empty unless unrolling was asked for.
     std::vector<LoopReport> loops;
 
+    /// Pointers introduced into loops (with unrolling, or allowDeadRegisterChanges).
+    std::vector<PointerReport> pointers;
+
     /// The scheduled blocks. Their line numbers refer to the unrolled source when loops were
     /// unrolled.
     std::vector<BlockSummary> blocks;
@@ -86,6 +90,11 @@ struct OptimizeResult
  */
 [[nodiscard]] OptimizeResult optimizeSource(const std::string &source,
                                             const OptimizeOptions &options);
+
+/// Registers whose final value is not part of the result: the ones the optimizer took into use
+/// (unrolled copies, loop pointers), and with allowDeadRegisterChanges the ones nothing reads after
+/// their loop.
+[[nodiscard]] std::vector<unsigned> registersNotCompared(const OptimizeResult &result);
 
 } // namespace optimizer
 } // namespace Kites

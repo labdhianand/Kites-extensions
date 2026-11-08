@@ -247,6 +247,24 @@ void checkAssembles(const std::string &source, const char *what)
 }
 } // namespace
 
+std::vector<unsigned> registersNotCompared(const OptimizeResult &result)
+{
+    std::vector<unsigned> registers;
+    for (const LoopReport &loop : result.loops)
+    {
+        registers.insert(registers.end(), loop.renamedTo.begin(), loop.renamedTo.end());
+        registers.insert(registers.end(), loop.changedDeadRegisters.begin(),
+                         loop.changedDeadRegisters.end());
+    }
+    for (const PointerReport &pointer : result.pointers)
+    {
+        registers.push_back(pointer.pointer);
+        registers.insert(registers.end(), pointer.changedDeadRegisters.begin(),
+                         pointer.changedDeadRegisters.end());
+    }
+    return registers;
+}
+
 OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions &options)
 {
     OptimizeResult result;
@@ -262,6 +280,44 @@ OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions
         source = std::move(unrolled.source);
         result.loops = std::move(unrolled.loops);
         result.changed = unrolled.changed;
+    }
+    if (options.unrollFactor > 1 || options.allowDeadRegisterChanges)
+    {
+        PointerOptions pointerOptions;
+        pointerOptions.allowDeadRegisterChanges = options.allowDeadRegisterChanges;
+        for (const LoopReport &loop : result.loops)
+        {
+            pointerOptions.optimizerRegisters.insert(pointerOptions.optimizerRegisters.end(),
+                                                     loop.renamedTo.begin(), loop.renamedTo.end());
+        }
+        PointerResult pointers = introducePointers(source, pointerOptions);
+        source = std::move(pointers.source);
+        result.pointers = std::move(pointers.pointers);
+        result.changed = result.changed || pointers.changed;
+    }
+
+    // On a variant without hazard detection the scheduler trusts its input to be correctly padded:
+    // a block it cannot improve is written out unchanged. Unrolling, folding and pointers can
+    // remove the instructions that used to stand between a producer and its consumer, so pad the
+    // transformed program again first. If that is impossible (padding would be needed inside a
+    // pseudo-instruction), keep the loops as they were.
+    if (source != original && !options.padOnly && !CostModel{options.variant}.detectsHazards())
+    {
+        OptimizeOptions pad;
+        pad.variant = options.variant;
+        pad.loadExtraLatency = options.loadExtraLatency;
+        pad.padOnly = true;
+        try
+        {
+            source = optimizeSource(source, pad).source;
+        }
+        catch (const std::exception &)
+        {
+            source = original;
+            result.loops.clear();
+            result.pointers.clear();
+            result.changed = false;
+        }
     }
 
     std::istringstream stream(source);

@@ -106,6 +106,13 @@ Suggestion makeSuggestion(const SuggestionRequest &request)
                                                loop.changedDeadRegisters.begin(),
                                                loop.changedDeadRegisters.end());
     }
+    for (const optimizer::PointerReport &pointer : suggestion.result.pointers)
+    {
+        suggestion.renamedRegisters.push_back(pointer.pointer);
+        suggestion.changedDeadRegisters.insert(suggestion.changedDeadRegisters.end(),
+                                               pointer.changedDeadRegisters.begin(),
+                                               pointer.changedDeadRegisters.end());
+    }
 
     if (request.measure)
     {
@@ -117,10 +124,8 @@ Suggestion makeSuggestion(const SuggestionRequest &request)
         suggestion.baselineCycles = before.cycles;
         suggestion.suggestionCycles = after.cycles;
         suggestion.baselineCorrect = sameResult(reference.state, before.state);
-        std::vector<unsigned> notCompared = suggestion.renamedRegisters;
-        notCompared.insert(notCompared.end(), suggestion.changedDeadRegisters.begin(),
-                           suggestion.changedDeadRegisters.end());
-        suggestion.suggestionCorrect = sameResult(reference.state, after.state, notCompared);
+        suggestion.suggestionCorrect = sameResult(reference.state, after.state,
+                                                  optimizer::registersNotCompared(suggestion.result));
     }
     return suggestion;
 }

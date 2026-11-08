@@ -12,6 +12,7 @@
 #include "optimizer_test_support.h"
 #include "processor/rv5s/rv5s_processor_h_f.h"
 #include "processor/rv5s/rv5s_processor_h_nf.h"
+#include "processor/rv5s/rv5s_processor_nh_nf.h"
 #include "processor/rvss/rvss_processor.h"
 #include "utils/utils.h"
 
@@ -63,6 +64,46 @@ vecadd:
 )";
 
 // Equal registers and memory, except registers the unroller started using.
+int pick(std::mt19937 &rng, int lowest, int highest)
+{
+    return std::uniform_int_distribution<int>(lowest, highest)(rng);
+}
+
+// Equal apart from the ignored registers; otherwise says what differs.
+::testing::AssertionResult sameExcept(const Snapshot &a, const Snapshot &b,
+                                      const std::vector<unsigned> &ignored)
+{
+    Snapshot left = a;
+    Snapshot right = b;
+    for (unsigned reg : ignored)
+    {
+        left.gprs[reg] = right.gprs[reg] = 0;
+    }
+    if (left == right)
+    {
+        return ::testing::AssertionSuccess();
+    }
+    ::testing::AssertionResult failure = ::testing::AssertionFailure();
+    for (unsigned r = 0; r < 32; ++r)
+    {
+        if (left.gprs[r] != right.gprs[r])
+        {
+            failure << "x" << r << ": " << static_cast<int64_t>(left.gprs[r]) << " vs "
+                    << static_cast<int64_t>(right.gprs[r]) << "; ";
+        }
+    }
+    if (left.memory != right.memory)
+    {
+        failure << "memory differs; ";
+    }
+    failure << "ignored:";
+    for (unsigned reg : ignored)
+    {
+        failure << " x" << reg;
+    }
+    return failure;
+}
+
 bool sameExceptRenamed(const Snapshot &a, const Snapshot &b, const std::vector<LoopReport> &loops)
 {
     Snapshot left = a;
@@ -319,7 +360,9 @@ TEST(OptimizerUnroller, ASourceThatDoesNotAssembleIsAnError)
 namespace
 {
 // A loop with a random body: integer arithmetic on x5-x9, iteration-local temporaries x16-x19 (so
-// renaming has work to do), and loads and stores through bases that move every iteration.
+// renaming has work to do), loads and stores through bases that move every iteration, and loads and
+// stores indexed by the counter from a fixed base x22 (so pointers have work to do). The two kinds
+// of access overlap in memory.
 std::string randomLoopProgram(std::mt19937 &rng, int tripCount)
 {
     auto pick = [&](int lowest, int highest)
@@ -331,7 +374,9 @@ std::string randomLoopProgram(std::mt19937 &rng, int tripCount)
 
     std::ostringstream out;
     out << "li x5, 11\nli x6, 22\nli x7, 33\nli x8, 44\nli x9, 55\n";
-    out << "li x10, 8192\nli x11, 8196\n";
+    // Real instructions rather than `li`, which for these values expands to two instructions that
+    // the pipeline without hazard detection would need padding between.
+    out << "lui x10, 2\nlui x11, 2\naddi x11, x11, 4\nlui x22, 2\naddi x22, x22, 8\n";
     out << "addi x20, x0, 0\naddi x21, x0, " << tripCount << "\n";
     out << "loop:\n";
 
@@ -347,8 +392,16 @@ std::string randomLoopProgram(std::mt19937 &rng, int tripCount)
         {
             break;
         }
-        switch (pick(0, 7))
+        switch (pick(0, 8))
         {
+        case 8:
+        {
+            const std::string t = temp();
+            out << "slli " << t << ", x20, 2\nadd " << t << ", x22, " << t << "\n"
+                << (pick(0, 1) ? "lw " : "sw ") << any() << ", " << pick(0, 3) * 4 << "(" << t
+                << ")\n";
+            break;
+        }
         case 0:
             out << "add " << any() << ", " << any() << ", " << any() << "\n";
             break;
@@ -422,6 +475,7 @@ TEST(OptimizerUnrollerSimulation, FoldedRandomLoopsComputeTheSameResult)
     std::mt19937 rng(4242);
     const size_t programCount = programCountFromEnvironment("KITES_UNROLL_PROGRAMS", 40);
     size_t foldedCount = 0;
+    size_t pointerCount = 0;
 
     for (size_t i = 0; i < programCount; ++i)
     {
@@ -446,17 +500,33 @@ TEST(OptimizerUnrollerSimulation, FoldedRandomLoopsComputeTheSameResult)
 
         OptimizeOptions options;
         options.variant = PipelineVariant::H_F;
-        options.unrollFactor = 4;
+        options.unrollFactor = pick(rng, 1, 4);
         options.allowDeadRegisterChanges = true;
         const OptimizeResult optimized = optimizeSource(source, options);
         const Snapshot pipelined = runOn<RV5StageProcessorHF>(assembleSource(optimized.source)).snapshot;
-        EXPECT_TRUE(sameExceptRenamed(reference, pipelined, optimized.loops)) << optimized.source;
+        EXPECT_TRUE(sameExcept(reference, pipelined, registersNotCompared(optimized)))
+            << optimized.source;
+
+        // The pipeline without hazard detection or forwarding: padded first, as for a suggestion,
+        // so the pointer set-up and the loop boundary rules are exercised too.
+        OptimizeOptions pad;
+        pad.variant = PipelineVariant::NH_NF;
+        pad.padOnly = true;
+        const std::string padded = optimizeSource(source, pad).source;
+        options.variant = PipelineVariant::NH_NF;
+        options.dropNops = true;
+        const OptimizeResult noStalls = optimizeSource(padded, options);
+        const Snapshot unprotected = runOn<RV5StageProcessorNHNF>(assembleSource(noStalls.source)).snapshot;
+        EXPECT_TRUE(sameExcept(reference, unprotected, registersNotCompared(noStalls)))
+            << noStalls.source;
 
         foldedCount += result.loops[0].foldedInstructions > 0 ? 1 : 0;
+        pointerCount += optimized.pointers.empty() ? 0 : 1;
     }
 
-    // Guards the test itself: folding has something to do in a good share of the loops.
+    // Guards the test itself: folding and pointers have something to do in a good share of the loops.
     EXPECT_GT(foldedCount, programCount / 5);
+    EXPECT_GT(pointerCount, programCount / 5);
 }
 
 TEST(OptimizerUnrollerSimulation, UnrollingThenReorderingIsCorrectAndFasterOnThePipelines)

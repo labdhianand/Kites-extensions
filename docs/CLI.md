@@ -102,7 +102,7 @@ that the suggestion computes exactly the same result.
 |---|---|
 | `--suggest` | Turn on suggestion mode. `--vm` then defaults to `rv5-h-f`; `rvss` is not accepted (a single-cycle processor has nothing to reorder for). |
 | `--unroll <n>` | Also unroll counted loops by up to `n`, when that is provably exact (fixed trip count divisible by the factor). Off by default, because it changes the code size. |
-| `--only-live-registers` | With `--unroll`: let the unrolled copies share one address computation (a later copy uses the first copy's address with a larger offset, `lw x5, 4(x30)`, and the counter steps once). Registers nothing reads after the loop may then end with different values; they are listed and left out of the comparison, while memory and every other register must still match. Without this flag every register must end the same, which leaves little to remove. |
+| `--only-live-registers` | Compute array addresses once instead of in every iteration. A loop that indexes memory (`slli t, i, 2; add p, base, t`) steps a pointer instead (`addi p, p, 4`), set up just before the loop; with `--unroll`, the copies also reach their data from the first copy's address with a larger offset (`lw x5, 4(p)`), and the counter steps once. Registers nothing reads after the loop may then end with different values; they are listed and left out of the comparison, while memory and every other register must still match. Without this flag every register must end the same, which leaves little to remove. |
 | `--cold-cache` | Measure with the cache-latency model (L1 128 B, L2 2 KB; +0 / +4 / +20 cycles per L1 hit / L2 hit / memory access) instead of ideal memory. |
 | `--plan-latency <n>` | Extra cycles per load the optimizer should plan for. Defaults to 0, or 4 (the L2 latency) with `--cold-cache`. |
 | `--out <file>` | Write the suggested program to `<file>`. |
@@ -147,17 +147,25 @@ Measured on rv5-h-f with ideal memory (every access takes one cycle):
 ```
 
 With `--only-live-registers` the second copy reuses the first copy's address, so its `slli` and
-`add` go and the two counter steps become one `addi x12, x12, 2`:
+`add` go and the two counter steps become one `addi x12, x12, 2`. The remaining address
+computation then leaves the loop: `x6 = &a[i]` is set up once before it and stepped by 8 bytes per
+round, and the loads and stores use `x6` with fixed offsets:
 
 ```
 $ kites-cli benchmarks/vector_add.s --suggest --vm rv5-h-f --unroll 2 --only-live-registers
   lines 15-22: unrolled x2 (32 iterations, 5 registers renamed, 3 repeated address instructions removed)
     not read after the loop, so they now end differently: x14 x15
+
+Pointers (line numbers refer to the program after unrolling):
+  loop at lines 16-27: x6 steps 8 bytes per iteration instead of recomputing the address (2 instructions removed, 1 step added)
   ...
   original            388 cycles
-  suggested           244 cycles   -37.1%
+  suggested           230 cycles   -40.7%
   result          identical to the original on the single-cycle processor
 ```
+
+The flag also works without `--unroll`: `vector_add` on `rv5-nh-nf` goes from 678 to 394 cycles
+with the pointer alone.
 
 Exit codes: `0` success, `1` the program cannot be read or assembled (or bad options), `2` the
 suggestion computed a different result on the simulator (this should never happen; please report
