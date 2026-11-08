@@ -25,6 +25,10 @@ struct SuggestionRequest
     /// Unroll counted loops by up to this factor (1 = no unrolling).
     int unrollFactor{1};
 
+    /// Only memory and the registers read after each loop must come out the same, which lets
+    /// unrolling drop repeated address arithmetic. Off: every register must match.
+    bool allowDeadRegisterChanges{false};
+
     /// Extra cycles per load to plan for; -1 picks a default for the memory setup.
     int plannedLatency{-1};
 
@@ -44,6 +48,9 @@ struct Suggestion
 
     /// Registers the suggestion uses that the original never did (from unrolling).
     std::vector<unsigned> renamedRegisters;
+    /// Registers that end with a different value because nothing reads them after their loop
+    /// (only with allowDeadRegisterChanges). Like renamedRegisters, they are not compared.
+    std::vector<unsigned> changedDeadRegisters;
 
     bool measured{false};
     unsigned baselineCycles{0};

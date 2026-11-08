@@ -257,6 +257,7 @@ OptimizeResult optimizeSource(const std::string &original, const OptimizeOptions
     {
         UnrollOptions unrollOptions;
         unrollOptions.maxFactor = options.unrollFactor;
+        unrollOptions.allowDeadRegisterChanges = options.allowDeadRegisterChanges;
         UnrollResult unrolled = unrollLoops(original, unrollOptions);
         source = std::move(unrolled.source);
         result.loops = std::move(unrolled.loops);

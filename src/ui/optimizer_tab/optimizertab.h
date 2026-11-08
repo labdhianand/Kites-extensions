@@ -11,6 +11,7 @@ class QComboBox;
 class QLabel;
 class QPushButton;
 class QSpinBox;
+class QCheckBox;
 
 namespace Kites
 {
@@ -74,6 +75,7 @@ class OptimizerTab : public KitesTab
     QComboBox *m_pipeline{nullptr};
     QComboBox *m_memory{nullptr};
     QComboBox *m_unroll{nullptr};
+    QCheckBox *m_onlyLiveRegisters{nullptr};
     QSpinBox *m_plannedLatency{nullptr};
     QPushButton *m_suggestButton{nullptr};
     QPushButton *m_applyButton{nullptr};

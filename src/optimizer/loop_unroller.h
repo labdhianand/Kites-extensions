@@ -30,6 +30,12 @@ struct UnrollOptions
     /// The largest unroll factor to try. The largest factor up to this that divides the trip
     /// count is used.
     int maxFactor{4};
+    /// Remove the address arithmetic the copies repeat (see address_folding.h).
+    bool foldAddresses{true};
+    /// Let registers the program never reads after a loop end with different values. Without
+    /// this every register keeps its final value, which leaves little to fold: the last copy
+    /// still has to compute its own addresses into the original registers.
+    bool allowDeadRegisterChanges{false};
 };
 
 /// What happened to one loop.
@@ -41,6 +47,10 @@ struct LoopReport
     int factor{1};
     long tripCount{-1}; ///< -1 if it could not be determined
     std::vector<unsigned> renamedTo; ///< previously unused registers the copies now use
+    int foldedInstructions{0};       ///< repeated address arithmetic removed from the copies
+    /// Registers (not read after the loop) that now end with a different value; only with
+    /// allowDeadRegisterChanges.
+    std::vector<unsigned> changedDeadRegisters;
     std::string reason;              ///< why the loop was left alone, when it was
 };
 

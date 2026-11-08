@@ -4,6 +4,7 @@
  */
 #include "optimizer/loop_unroller.h"
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <map>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 
 #include "assembler/assembler.h"
+#include "optimizer/address_folding.h"
 #include "optimizer/constant_propagation.h"
 #include "optimizer/liveness.h"
 #include "optimizer/program_model.h"
@@ -205,6 +207,32 @@ void checkAssembles(const std::string &source, const char *what)
         throw std::runtime_error(std::string(what) + ": " + error.what());
     }
 }
+
+// `body` (an instruction and maybe a comment) with the instruction replaced, keeping the comment
+// where it was.
+std::string withInstruction(const std::string &body, const std::string &instruction)
+{
+    // Keep the operands in the column the original put them in ("lw   x5, 0(x10)").
+    std::string text = instruction;
+    const size_t mnemonicEnd = body.find_first_of(" \t");
+    const size_t operandsStart = mnemonicEnd == std::string::npos
+                                     ? std::string::npos
+                                     : body.find_first_not_of(" \t", mnemonicEnd);
+    const size_t space = instruction.find(' ');
+    if (operandsStart != std::string::npos && space != std::string::npos && space < operandsStart)
+    {
+        text = instruction.substr(0, space) + std::string(operandsStart - space, ' ') +
+               instruction.substr(space + 1);
+    }
+
+    const size_t comment = body.find('#');
+    if (comment == std::string::npos)
+    {
+        return text;
+    }
+    text.resize(std::max(text.size() + 1, comment), ' ');
+    return text + body.substr(comment);
+}
 } // namespace
 
 bool isCalleeSaved(unsigned reg)
@@ -229,6 +257,7 @@ UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options
     const ControlFlow flow = computeControlFlow(model);
     const std::vector<BlockConstants> constants = propagateConstants(model, flow);
     const std::bitset<32> usedRegisters = registersUsedAnywhere(model);
+    const std::vector<BlockLiveness> liveness = computeLiveness(model);
 
     std::vector<unsigned> freeRegisters;
     for (unsigned r : kAllocationOrder)
@@ -366,6 +395,64 @@ UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options
             }
         }
 
+        // The copies as straight-line code (the branch only in the last copy), so that the
+        // address arithmetic they repeat can be folded away.
+        const size_t branchUnit = block.firstUnit + block.unitCount - 1;
+        std::vector<FoldInstr> code;
+        std::vector<std::map<size_t, size_t>> codeOfUnit(static_cast<size_t>(factor));
+        std::map<unsigned, size_t> unitOfLine;
+        for (int copy = 0; copy < factor; ++copy)
+        {
+            for (size_t u = block.firstUnit; u < block.firstUnit + block.unitCount; ++u)
+            {
+                const Unit &unit = model.units[u];
+                unitOfLine[unit.sourceLine] = u;
+                if (u == branchUnit && copy + 1 < factor)
+                {
+                    continue;
+                }
+                codeOfUnit[static_cast<size_t>(copy)][u] = code.size();
+                for (size_t k = 0; k < unit.instructionCount; ++k)
+                {
+                    code.push_back(makeFoldInstr(model.instructions[unit.firstInstruction + k],
+                                                 renames[static_cast<size_t>(copy)],
+                                                 unit.instructionCount == 1));
+                }
+            }
+        }
+        if (options.foldAddresses)
+        {
+            // Registers whose final value must not change: all of them, or only those read after
+            // the loop (which includes everything the loop itself carries into its next round).
+            std::bitset<32> keep;
+            if (options.allowDeadRegisterChanges)
+            {
+                for (unsigned r = 0; r < 32; ++r)
+                {
+                    keep[r] = liveness[b].liveOut[r];
+                }
+            }
+            else
+            {
+                keep.set();
+            }
+            for (unsigned r : report.renamedTo)
+            {
+                keep.reset(r); // nobody else reads the copies' own registers
+            }
+            const FoldResult folded = foldAddresses(code, keep);
+            report.foldedInstructions = folded.removed;
+            for (unsigned r = 1; r < 32; ++r)
+            {
+                if (folded.changedAtEnd[r] &&
+                    std::find(report.renamedTo.begin(), report.renamedTo.end(), r) ==
+                        report.renamedTo.end())
+                {
+                    report.changedDeadRegisters.push_back(r);
+                }
+            }
+        }
+
         // The loop's lines, written out once per copy. Only the first copy keeps a label that sits
         // on the first instruction's line, and only the last copy keeps the branch.
         const unsigned branchLine = report.lastLine;
@@ -395,8 +482,26 @@ UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options
                         prefix = leadingWhitespace(split.prefix);
                     }
                 }
-                lines.push_back(prefix +
-                                renameRegisters(split.body, renames[static_cast<size_t>(copy)]));
+                std::string body = renameRegisters(split.body, renames[static_cast<size_t>(copy)]);
+                const auto unit = unitOfLine.find(line);
+                if (unit != unitOfLine.end() && model.units[unit->second].instructionCount == 1)
+                {
+                    const FoldInstr &instr =
+                        code[codeOfUnit[static_cast<size_t>(copy)].at(unit->second)];
+                    if (instr.removed)
+                    {
+                        if (hasLabel(prefix))
+                        {
+                            lines.push_back(rightTrimmed(prefix)); // the label stays
+                        }
+                        continue;
+                    }
+                    if (instr.rewritten)
+                    {
+                        body = withInstruction(body, foldedAssembly(instr));
+                    }
+                }
+                lines.push_back(prefix + body);
             }
         }
 

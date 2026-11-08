@@ -21,10 +21,11 @@ using namespace optimizer_test;
 
 namespace
 {
-UnrollResult unroll(const std::string &source, int maxFactor = 4)
+UnrollResult unroll(const std::string &source, int maxFactor = 4, bool fold = true)
 {
     UnrollOptions options;
     options.maxFactor = maxFactor;
+    options.foldAddresses = fold;
     return unrollLoops(source, options);
 }
 
@@ -69,6 +70,10 @@ bool sameExceptRenamed(const Snapshot &a, const Snapshot &b, const std::vector<L
     for (const LoopReport &loop : loops)
     {
         for (unsigned reg : loop.renamedTo)
+        {
+            left.gprs[reg] = right.gprs[reg] = 0;
+        }
+        for (unsigned reg : loop.changedDeadRegisters)
         {
             left.gprs[reg] = right.gprs[reg] = 0;
         }
@@ -228,7 +233,7 @@ TEST(OptimizerUnroller, CopiesAreMarkedAndRenamedAndTheLastCopyKeepsTheOriginalN
         "    add  x8, x8, x7\n"
         "    addi x5, x5, 1\n"
         "    blt  x5, x6, loop\n";
-    const UnrollResult result = unroll(source, 2);
+    const UnrollResult result = unroll(source, 2, false); // the plain copies, without folding
     ASSERT_TRUE(result.loops.at(0).unrolled) << result.loops.at(0).reason;
     ASSERT_EQ(result.loops[0].renamedTo.size(), 1u); // only x7 is iteration-local
     const std::string fresh = "x" + std::to_string(result.loops[0].renamedTo[0]);
@@ -252,10 +257,25 @@ TEST(OptimizerUnroller, ALabelOnTheFirstLineStaysOnlyOnTheFirstCopy)
     const UnrollResult result = unroll(
         "    addi x5, x0, 0\n    addi x6, x0, 2\nloop: addi x8, x8, 1\n      addi x5, x5, 1\n"
         "      blt x5, x6, loop\n",
-        2);
+        2, false);
     ASSERT_TRUE(result.loops.at(0).unrolled) << result.loops.at(0).reason;
     EXPECT_EQ(countMatches(result.source, R"(loop:)"), 1u);
     EXPECT_EQ(countMatches(result.source, R"(addi x8, x8, 1)"), 2u);
+}
+
+TEST(OptimizerUnroller, FoldingKeepsTheLabelWhenItRemovesTheFirstInstruction)
+{
+    // Both copies add 1 to x8 and to the counter; folding turns each pair into one add of 2,
+    // removing the line the label is on. The label must stay, on a line of its own.
+    const UnrollResult result = unroll(
+        "    addi x5, x0, 0\n    addi x6, x0, 2\nloop: addi x8, x8, 1\n      addi x5, x5, 1\n"
+        "      blt x5, x6, loop\n",
+        2);
+    ASSERT_TRUE(result.loops.at(0).unrolled) << result.loops.at(0).reason;
+    EXPECT_EQ(result.loops[0].foldedInstructions, 2);
+    EXPECT_EQ(countMatches(result.source, R"(\nloop:\n)"), 1u) << result.source; // on its own line
+    EXPECT_EQ(countMatches(result.source, R"(addi\s+x8,\s*x8,\s*2)"), 1u) << result.source;
+    EXPECT_EQ(countMatches(result.source, R"(addi\s+x5,\s*x5,\s*2)"), 1u) << result.source;
 }
 
 TEST(OptimizerUnroller, AbiRegisterNamesAreRecognisedWhenRenaming)
@@ -269,7 +289,7 @@ TEST(OptimizerUnroller, AbiRegisterNamesAreRecognisedWhenRenaming)
         addi a0, a0, 1
         blt  a0, a1, loop
     )",
-                                       2);
+                                       2, false);
     ASSERT_TRUE(result.loops.at(0).unrolled) << result.loops.at(0).reason;
     EXPECT_EQ(result.loops[0].renamedTo.size(), 1u); // t0
     EXPECT_EQ(countMatches(result.source, R"(\bt0\b)"), 2u); // only in the last copy
@@ -381,6 +401,8 @@ TEST(OptimizerUnrollerSimulation, UnrolledRandomLoopsComputeTheSameResult)
         const Snapshot before = runOn<RVSSProcessor>(assembleSource(source)).snapshot;
         const Snapshot after = runOn<RVSSProcessor>(assembleSource(result.source)).snapshot;
         EXPECT_TRUE(sameExceptRenamed(before, after, result.loops)) << result.source;
+        // Without allowDeadRegisterChanges, every original register keeps its final value.
+        EXPECT_TRUE(result.loops[0].changedDeadRegisters.empty());
 
         unrolledCount += result.loops[0].unrolled ? 1 : 0;
         renamedCount += result.loops[0].renamedTo.empty() ? 0 : 1;
@@ -389,6 +411,52 @@ TEST(OptimizerUnrollerSimulation, UnrolledRandomLoopsComputeTheSameResult)
     // Guards the test itself: most loops are unrolled and most of those rename something.
     EXPECT_GT(unrolledCount, programCount / 2);
     EXPECT_GT(renamedCount, programCount / 4);
+}
+
+TEST(OptimizerUnrollerSimulation, FoldedRandomLoopsComputeTheSameResult)
+{
+    // The same random loops, letting registers nothing reads after the loop end differently, so
+    // the repeated address arithmetic can go. Checked on the single-cycle processor, and after
+    // scheduling on the pipeline with hazard detection and forwarding.
+    setupVmStateDirectory();
+    std::mt19937 rng(4242);
+    const size_t programCount = programCountFromEnvironment("KITES_UNROLL_PROGRAMS", 40);
+    size_t foldedCount = 0;
+
+    for (size_t i = 0; i < programCount; ++i)
+    {
+        const int trips = std::uniform_int_distribution<int>(1, 12)(rng);
+        const std::string source = randomLoopProgram(rng, trips);
+        SCOPED_TRACE("trip count " + std::to_string(trips) + ":\n" + source);
+
+        UnrollOptions unrollOptions;
+        unrollOptions.maxFactor = 4;
+        unrollOptions.allowDeadRegisterChanges = true;
+        const UnrollResult result = unrollLoops(source, unrollOptions);
+        ASSERT_EQ(result.loops.size(), 1u);
+
+        const Snapshot reference = runOn<RVSSProcessor>(assembleSource(source)).snapshot;
+        const Snapshot unrolled = runOn<RVSSProcessor>(assembleSource(result.source)).snapshot;
+        EXPECT_TRUE(sameExceptRenamed(reference, unrolled, result.loops)) << result.source;
+        // The loop counter and bound are read by the loop itself, so they always survive.
+        for (unsigned reg : result.loops[0].changedDeadRegisters)
+        {
+            EXPECT_TRUE(reg != 20 && reg != 21) << "x" << reg;
+        }
+
+        OptimizeOptions options;
+        options.variant = PipelineVariant::H_F;
+        options.unrollFactor = 4;
+        options.allowDeadRegisterChanges = true;
+        const OptimizeResult optimized = optimizeSource(source, options);
+        const Snapshot pipelined = runOn<RV5StageProcessorHF>(assembleSource(optimized.source)).snapshot;
+        EXPECT_TRUE(sameExceptRenamed(reference, pipelined, optimized.loops)) << optimized.source;
+
+        foldedCount += result.loops[0].foldedInstructions > 0 ? 1 : 0;
+    }
+
+    // Guards the test itself: folding has something to do in a good share of the loops.
+    EXPECT_GT(foldedCount, programCount / 5);
 }
 
 TEST(OptimizerUnrollerSimulation, UnrollingThenReorderingIsCorrectAndFasterOnThePipelines)

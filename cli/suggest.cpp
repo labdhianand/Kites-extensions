@@ -45,7 +45,20 @@ void printLoops(const std::vector<optimizer::LoopReport> &loops)
             {
                 std::cout << ", " << loop.renamedTo.size() << " registers renamed";
             }
+            if (loop.foldedInstructions > 0)
+            {
+                std::cout << ", " << loop.foldedInstructions << " repeated address instructions removed";
+            }
             std::cout << ")\n";
+            if (!loop.changedDeadRegisters.empty())
+            {
+                std::cout << "    not read after the loop, so they now end differently:";
+                for (unsigned reg : loop.changedDeadRegisters)
+                {
+                    std::cout << " x" << reg;
+                }
+                std::cout << "\n";
+            }
             std::string saved;
             for (unsigned reg : loop.renamedTo)
             {
@@ -120,6 +133,7 @@ int RunSuggest(const SuggestOptions &options)
     request.memory =
         options.coldCache ? benchmarking::MemorySetup::ColdCache : benchmarking::MemorySetup::Ideal;
     request.unrollFactor = options.unrollFactor;
+    request.allowDeadRegisterChanges = options.allowDeadRegisterChanges;
     request.plannedLatency = options.plannedLatency;
     request.measure = options.verify;
 
@@ -186,6 +200,10 @@ int RunSuggest(const SuggestOptions &options)
         if (!suggestion.renamedRegisters.empty())
         {
             std::cout << "                  (registers the original never used are not compared)\n";
+        }
+        if (!suggestion.changedDeadRegisters.empty())
+        {
+            std::cout << "                  (nor registers nothing reads after their loop)\n";
         }
         if (!suggestion.suggestionCorrect)
         {
