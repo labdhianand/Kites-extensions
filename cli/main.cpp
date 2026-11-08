@@ -9,6 +9,7 @@
 #include "processor/processor_manager.h"
 #include "processor/processor_types.h"
 #include "repl.h"
+#include "suggest.h"
 #include "utils/utils.h"
 
 #include <QCoreApplication>
@@ -34,7 +35,33 @@ void printUsage(const char *programName)
            "repeatable (batch mode only)\n"
         << "  --repl, -i      drop into the interactive REPL instead of auto-running;\n"
         << "                  if assembly-file is given it is loaded before the prompt\n"
-        << "  (running with no assembly-file also enters the REPL)\n";
+        << "  (running with no assembly-file also enters the REPL)\n"
+        << "\n"
+        << "Reordering suggestions (see docs/CLI.md):\n"
+        << "  " << programName << " <assembly-file> --suggest [--vm <rv5-...>] [options]\n"
+        << "  --suggest           suggest a better instruction order for the pipeline given by\n"
+        << "                      --vm (default rv5-h-f), show the diff and measure both\n"
+        << "  --unroll <n>        also unroll counted loops by up to n\n"
+        << "  --cold-cache        measure with cache latencies instead of ideal memory\n"
+        << "  --plan-latency <n>  extra cycles per load to plan for (default 0, or 4 with\n"
+        << "                      --cold-cache)\n"
+        << "  --out <file>        write the suggested program to <file>\n"
+        << "  --no-verify         do not run the programs on the simulator\n";
+}
+
+// Parses a non-negative integer option value, or returns -1.
+int parseCount(const std::string &text)
+{
+    try
+    {
+        size_t used = 0;
+        const int value = std::stoi(text, &used);
+        return used == text.size() && value >= 0 ? value : -1;
+    }
+    catch (const std::exception &)
+    {
+        return -1;
+    }
 }
 
 const std::unordered_map<std::string, Kites::ProcessorType> processorTypes = {
@@ -56,6 +83,9 @@ int main(int argc, char *argv[])
     std::string processorTypeStr = "rvss";
     std::vector<std::string> memDumpArgs;
     bool replRequested = false;
+    bool vmGiven = false;
+    bool suggestRequested = false;
+    Kites::SuggestOptions suggest;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -69,6 +99,42 @@ int main(int argc, char *argv[])
                 return 1;
             }
             processorTypeStr = argv[++i];
+            vmGiven = true;
+        }
+        else if (arg == "--suggest")
+        {
+            suggestRequested = true;
+        }
+        else if (arg == "--unroll" || arg == "--plan-latency")
+        {
+            const int value = i + 1 < argc ? parseCount(argv[i + 1]) : -1;
+            if (value < 0 || (arg == "--unroll" && value < 1))
+            {
+                std::cerr << "Error: " << arg << " requires a "
+                          << (arg == "--unroll" ? "positive" : "non-negative") << " number.\n";
+                printUsage(argv[0]);
+                return 1;
+            }
+            ++i;
+            (arg == "--unroll" ? suggest.unrollFactor : suggest.plannedLatency) = value;
+        }
+        else if (arg == "--cold-cache")
+        {
+            suggest.coldCache = true;
+        }
+        else if (arg == "--no-verify")
+        {
+            suggest.verify = false;
+        }
+        else if (arg == "--out")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "Error: --out requires a file name.\n";
+                printUsage(argv[0]);
+                return 1;
+            }
+            suggest.outputFile = argv[++i];
         }
         else if (arg == "--mem-dump")
         {
@@ -103,12 +169,30 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (suggestRequested && !vmGiven)
+    {
+        processorTypeStr = "rv5-h-f"; // suggestions are for the pipelines
+    }
     auto processorTypeIt = processorTypes.find(processorTypeStr);
     if (processorTypeIt == processorTypes.end())
     {
         std::cerr << "Error: unknown VM type '" << processorTypeStr << "'.\n";
         printUsage(argv[0]);
         return 1;
+    }
+
+    if (suggestRequested)
+    {
+        if (assemblyFile.empty())
+        {
+            std::cerr << "Error: --suggest needs an assembly file.\n";
+            printUsage(argv[0]);
+            return 1;
+        }
+        suggest.assemblyFile = assemblyFile;
+        suggest.processor = processorTypeIt->second;
+        suggest.processorName = processorTypeStr;
+        return Kites::RunSuggest(suggest);
     }
 
     if (replRequested || assemblyFile.empty())

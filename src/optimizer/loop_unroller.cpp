@@ -372,11 +372,19 @@ UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options
                 }
                 const SplitLine split = splitLine(text.lines.at(line - 1));
                 std::string prefix = split.prefix;
-                if (copy > 0 && line == report.firstLine)
+                if (line == report.firstLine)
                 {
-                    prefix = leadingWhitespace(split.prefix);
-                    lines.push_back(prefix + "# unrolled iteration " + std::to_string(copy + 1) +
-                                    " of " + std::to_string(factor));
+                    // One note at the top. Markers between the copies would end up in the middle
+                    // of interleaved code once the scheduler reorders the body.
+                    if (copy == 0)
+                    {
+                        lines.push_back(leadingWhitespace(split.prefix) + "# loop unrolled x" +
+                                        std::to_string(factor));
+                    }
+                    else
+                    {
+                        prefix = leadingWhitespace(split.prefix);
+                    }
                 }
                 lines.push_back(prefix +
                                 renameRegisters(split.body, renames[static_cast<size_t>(copy)]));
