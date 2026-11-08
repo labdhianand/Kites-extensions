@@ -80,6 +80,36 @@ void printLoops(const std::vector<optimizer::LoopReport> &loops)
     }
 }
 
+void printPointers(const std::vector<optimizer::PointerReport> &pointers)
+{
+    if (pointers.empty())
+    {
+        return;
+    }
+    std::cout << "\nPointers (line numbers refer to the program after unrolling):\n";
+    for (const optimizer::PointerReport &pointer : pointers)
+    {
+        std::cout << "  loop at lines " << pointer.firstLine << "-" << pointer.lastLine << ": x"
+                  << pointer.pointer << " steps " << pointer.stride
+                  << " bytes per iteration instead of recomputing the address ("
+                  << pointer.removed << " instructions removed, 1 step added)\n";
+        if (optimizer::isCalleeSaved(pointer.pointer))
+        {
+            std::cout << "    note: x" << pointer.pointer
+                      << " is callee-saved; inside a function, save and restore it\n";
+        }
+        if (!pointer.changedDeadRegisters.empty())
+        {
+            std::cout << "    not read after the loop, so they now end differently:";
+            for (unsigned reg : pointer.changedDeadRegisters)
+            {
+                std::cout << " x" << reg;
+            }
+            std::cout << "\n";
+        }
+    }
+}
+
 void printBlocks(const optimizer::OptimizeResult &result)
 {
     int changed = 0;
@@ -167,6 +197,7 @@ int RunSuggest(const SuggestOptions &options)
     }
 
     printLoops(result.loops);
+    printPointers(result.pointers);
     printBlocks(result);
 
     if (!result.changed)

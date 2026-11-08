@@ -544,5 +544,400 @@ UnrollResult unrollLoops(const std::string &source, const UnrollOptions &options
     return result;
 }
 
+namespace
+{
+// A way a loop computes an address from its counter: base + (counter << shift). `base` is 0 when
+// there is no base register.
+struct PointerCandidate
+{
+    unsigned counter{0};
+    int64_t step{0};
+    unsigned shift{0};
+    unsigned base{0};
+
+    bool operator==(const PointerCandidate &other) const = default;
+};
+
+bool isSelfLoop(const ProgramModel &model, const BasicBlock &block)
+{
+    const InstrInfo &last = model.instructions[block.firstInstruction + block.instructionCount - 1];
+    return last.klass == InstrClass::Branch && last.hasTarget &&
+           last.targetPc == model.instructions[block.firstInstruction].pc;
+}
+
+// Tries one pointer in one loop. On success rewrites `source` and fills `report`.
+bool tryPointer(const ProgramModel &model, const std::vector<BlockLiveness> &liveness, size_t b,
+                const PointerCandidate &candidate, unsigned pointer,
+                const std::vector<unsigned> &notKept, bool allowDeadRegisterChanges,
+                std::string &source, PointerReport &report)
+{
+    const BasicBlock &block = model.blocks[b];
+    const int64_t stride = static_cast<int64_t>(static_cast<uint64_t>(candidate.step)
+                                                << candidate.shift);
+    if (stride < -2048 || stride > 2047)
+    {
+        return false;
+    }
+
+    // Straight-line code for one round: the set-up before the loop, the body, the step, the
+    // branch. The added instructions are never removed or rewritten.
+    std::vector<FoldInstr> code;
+    auto added = [](FoldKind kind, unsigned rd, unsigned rs1, unsigned rs2, int64_t imm)
+    {
+        FoldInstr instr;
+        instr.kind = kind;
+        instr.rd = rd;
+        instr.rs1 = rs1;
+        instr.rs2 = rs2;
+        instr.imm = imm;
+        instr.rewritable = false;
+        return instr;
+    };
+    code.push_back(added(FoldKind::ShiftLeftImmediate, pointer, candidate.counter, 0,
+                         candidate.shift));
+    if (candidate.base != 0)
+    {
+        code.push_back(added(FoldKind::Add, pointer, candidate.base, pointer, 0));
+    }
+    const size_t setupCount = code.size();
+
+    // Where the pointer steps: right after the last load, so the loads use it before the step and
+    // the stores after it (with offsets one stride lower), and the next round's first loads are
+    // as far from the step as possible. Without loads, just before the branch.
+    const size_t branchUnit = block.firstUnit + block.unitCount - 1;
+    size_t stepAfterUnit = branchUnit; // "before the branch"
+    for (size_t u = block.firstUnit; u < branchUnit; ++u)
+    {
+        const Unit &unit = model.units[u];
+        for (size_t k = 0; k < unit.instructionCount; ++k)
+        {
+            if (model.instructions[unit.firstInstruction + k].klass == InstrClass::Load)
+            {
+                stepAfterUnit = u;
+            }
+        }
+    }
+    std::map<size_t, size_t> codeOfUnit;
+    for (size_t u = block.firstUnit; u < block.firstUnit + block.unitCount; ++u)
+    {
+        const Unit &unit = model.units[u];
+        if (u == branchUnit && stepAfterUnit == branchUnit)
+        {
+            code.push_back(added(FoldKind::AddImmediate, pointer, pointer, 0, stride));
+        }
+        codeOfUnit[u] = code.size();
+        for (size_t k = 0; k < unit.instructionCount; ++k)
+        {
+            code.push_back(makeFoldInstr(model.instructions[unit.firstInstruction + k], {},
+                                         unit.instructionCount == 1));
+        }
+        if (u == stepAfterUnit && u != branchUnit)
+        {
+            code.push_back(added(FoldKind::AddImmediate, pointer, pointer, 0, stride));
+        }
+    }
+
+    std::bitset<32> keep;
+    if (allowDeadRegisterChanges)
+    {
+        for (unsigned r = 0; r < 32; ++r)
+        {
+            keep[r] = liveness[b].liveOut[r];
+        }
+    }
+    else
+    {
+        keep.set();
+    }
+    for (unsigned r : notKept)
+    {
+        keep.reset(r);
+    }
+    keep.set(pointer); // carried into the next round
+    keep.set(candidate.counter);
+
+    const FoldResult folded = foldAddresses(code, keep);
+    if (folded.removed < 2) // the loop gained a step, so it must lose at least two
+    {
+        return false;
+    }
+
+    // Write it out: the set-up after the block before the loop, the step before the branch.
+    const SourceText text = splitSource(source);
+    const unsigned firstLine = model.units[block.firstUnit].sourceLine;
+    const unsigned lastLine = model.units[branchUnit].sourceLine;
+    // The set-up goes right after the last write to the counter or the base in the block before
+    // the loop (or at its end if it writes neither). Anything later in that block then stands
+    // between the set-up and the loop, so the loop can use the pointer straight away.
+    const BasicBlock &before = model.blocks[b - 1];
+    unsigned setupAfter = model.units[before.firstUnit + before.unitCount - 1].sourceLine;
+    for (size_t u = before.firstUnit; u < before.firstUnit + before.unitCount; ++u)
+    {
+        const Unit &unit = model.units[u];
+        for (size_t k = 0; k < unit.instructionCount; ++k)
+        {
+            const InstrInfo &info = model.instructions[unit.firstInstruction + k];
+            if (info.dest.isValid() && info.dest.file == RegFile::Gpr &&
+                (info.dest.index == candidate.counter ||
+                 (candidate.base != 0 && info.dest.index == candidate.base)))
+            {
+                setupAfter = unit.sourceLine;
+            }
+        }
+    }
+    if (firstLine == 0 || lastLine == 0 || setupAfter == 0 || setupAfter >= firstLine)
+    {
+        return false;
+    }
+    const std::string indent = leadingWhitespace(splitLine(text.lines.at(firstLine - 1)).prefix);
+    const std::string branchIndent =
+        leadingWhitespace(splitLine(text.lines.at(lastLine - 1)).prefix);
+    auto reg = [](unsigned r) { return "x" + std::to_string(r); };
+
+    std::map<unsigned, std::vector<std::string>> replacements;
+    std::vector<std::string> setup = {text.lines.at(setupAfter - 1)};
+    setup.push_back(indent + "slli " + reg(pointer) + ", " + reg(candidate.counter) + ", " +
+                    std::to_string(candidate.shift) + "  # pointer for the loop below");
+    if (candidate.base != 0)
+    {
+        setup.push_back(indent + "add  " + reg(pointer) + ", " + reg(candidate.base) + ", " +
+                        reg(pointer));
+    }
+    replacements[setupAfter] = setup;
+
+    for (size_t u = block.firstUnit; u < block.firstUnit + block.unitCount; ++u)
+    {
+        const Unit &unit = model.units[u];
+        const unsigned line = unit.sourceLine;
+        std::vector<std::string> lines;
+        const std::string step =
+            "addi " + reg(pointer) + ", " + reg(pointer) + ", " + std::to_string(stride);
+        if (u == branchUnit && stepAfterUnit == branchUnit)
+        {
+            lines.push_back(branchIndent + step);
+        }
+        const SplitLine split = splitLine(text.lines.at(line - 1));
+        if (unit.instructionCount == 1)
+        {
+            const FoldInstr &instr = code[codeOfUnit.at(u)];
+            if (instr.removed)
+            {
+                if (hasLabel(split.prefix))
+                {
+                    lines.push_back(rightTrimmed(split.prefix));
+                }
+            }
+            else if (instr.rewritten)
+            {
+                lines.push_back(split.prefix + withInstruction(split.body, foldedAssembly(instr)));
+            }
+            else
+            {
+                lines.push_back(text.lines.at(line - 1));
+            }
+        }
+        else
+        {
+            lines.push_back(text.lines.at(line - 1));
+        }
+        if (u == stepAfterUnit && u != branchUnit)
+        {
+            lines.push_back(indent + step);
+        }
+        replacements[line] = lines;
+    }
+
+    SourceText rewritten;
+    rewritten.newline = text.newline;
+    rewritten.endsWithNewline = text.endsWithNewline;
+    for (size_t i = 0; i < text.lines.size(); ++i)
+    {
+        const auto replacement = replacements.find(static_cast<unsigned>(i + 1));
+        if (replacement == replacements.end())
+        {
+            rewritten.lines.push_back(text.lines[i]);
+        }
+        else
+        {
+            rewritten.lines.insert(rewritten.lines.end(), replacement->second.begin(),
+                                   replacement->second.end());
+        }
+    }
+    source = joinSource(rewritten);
+    checkAssembles(source, "the program with a loop pointer does not assemble");
+
+    report.firstLine = firstLine;
+    report.lastLine = lastLine;
+    report.pointer = pointer;
+    report.stride = stride;
+    report.removed = folded.removed;
+    for (unsigned r = 1; r < 32; ++r)
+    {
+        if (folded.changedAtEnd[r] && r != pointer &&
+            std::find(notKept.begin(), notKept.end(), r) == notKept.end())
+        {
+            report.changedDeadRegisters.push_back(r);
+        }
+    }
+    (void)setupCount;
+    return true;
+}
+
+// Finds and makes one pointer anywhere in the program. False if there is none to make.
+bool introduceOnePointer(PointerResult &result, std::vector<unsigned> &notKept,
+                         bool allowDeadRegisterChanges)
+{
+    std::istringstream stream(result.source);
+    const AssembledProgram program = assemble(stream);
+    const ProgramModel model = buildProgramModel(program);
+    const ControlFlow flow = computeControlFlow(model);
+    const std::vector<BlockLiveness> liveness = computeLiveness(model);
+    const std::bitset<32> used = registersUsedAnywhere(model);
+
+    unsigned pointer = 0;
+    for (unsigned r : kAllocationOrder)
+    {
+        if (!used[r])
+        {
+            pointer = r;
+            break;
+        }
+    }
+    if (pointer == 0)
+    {
+        return false;
+    }
+
+    for (size_t b = 1; b < model.blocks.size(); ++b)
+    {
+        const BasicBlock &block = model.blocks[b];
+        if (!isSelfLoop(model, block) || !block.isReorderable || flow.hasUnknownPredecessors[b])
+        {
+            continue;
+        }
+        // Entered only by falling in from the block before (not by a jump to the label).
+        bool onlyFallThrough = true;
+        for (size_t predecessor : flow.predecessors[b])
+        {
+            onlyFallThrough = onlyFallThrough && (predecessor == b || predecessor == b - 1);
+        }
+        const BasicBlock &before = model.blocks[b - 1];
+        const InstrInfo &beforeLast =
+            model.instructions[before.firstInstruction + before.instructionCount - 1];
+        const uint64_t loopStart = model.instructions[block.firstInstruction].pc;
+        if (!onlyFallThrough || beforeLast.klass == InstrClass::Jal ||
+            beforeLast.klass == InstrClass::Jalr ||
+            (beforeLast.klass == InstrClass::Branch && beforeLast.hasTarget &&
+             beforeLast.targetPc == loopStart))
+        {
+            continue;
+        }
+
+        std::vector<FoldInstr> body;
+        bool floatingPoint = false;
+        for (size_t k = block.firstInstruction; k < block.firstInstruction + block.instructionCount;
+             ++k)
+        {
+            floatingPoint = floatingPoint || usesFloatingPoint(model.instructions[k]);
+            body.push_back(makeFoldInstr(model.instructions[k], {}, true));
+        }
+        if (floatingPoint)
+        {
+            continue;
+        }
+        std::array<int, 32> writes{};
+        std::array<const FoldInstr *, 32> writer{};
+        for (const FoldInstr &instr : body)
+        {
+            if (instr.rd != 0)
+            {
+                ++writes[instr.rd];
+                writer[instr.rd] = &instr;
+            }
+        }
+        auto isCounter = [&](unsigned r)
+        {
+            return r != 0 && writes[r] == 1 && writer[r]->kind == FoldKind::AddImmediate &&
+                   writer[r]->rs1 == r && writer[r]->imm != 0;
+        };
+
+        std::vector<PointerCandidate> candidates;
+        for (size_t i = 0; i < body.size(); ++i)
+        {
+            const FoldInstr &shift = body[i];
+            if (shift.kind != FoldKind::ShiftLeftImmediate || !isCounter(shift.rs1) ||
+                shift.rd == 0)
+            {
+                continue;
+            }
+            PointerCandidate candidate{shift.rs1, writer[shift.rs1]->imm,
+                                       static_cast<unsigned>(shift.imm), 0};
+            for (size_t j = i + 1; j < body.size(); ++j)
+            {
+                const FoldInstr &next = body[j];
+                if (next.kind == FoldKind::Add && (next.rs1 == shift.rd || next.rs2 == shift.rd))
+                {
+                    const unsigned other = next.rs1 == shift.rd ? next.rs2 : next.rs1;
+                    if (other != 0 && writes[other] == 0)
+                    {
+                        candidate.base = other;
+                    }
+                    break;
+                }
+                if (next.rd == shift.rd)
+                {
+                    break;
+                }
+            }
+            if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end())
+            {
+                candidates.push_back(candidate);
+            }
+        }
+
+        for (const PointerCandidate &candidate : candidates)
+        {
+            PointerReport report;
+            if (tryPointer(model, liveness, b, candidate, pointer, notKept,
+                           allowDeadRegisterChanges, result.source, report))
+            {
+                notKept.push_back(pointer);
+                result.pointers.push_back(report);
+                result.changed = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+} // namespace
+
+PointerResult introducePointers(const std::string &source, const PointerOptions &options)
+{
+    {
+        std::istringstream stream(source);
+        try
+        {
+            (void)assemble(stream);
+        }
+        catch (const std::exception &error)
+        {
+            throw std::runtime_error(std::string("the program does not assemble: ") + error.what());
+        }
+    }
+    PointerResult result;
+    result.source = source;
+    std::vector<unsigned> notKept = options.optimizerRegisters;
+    // One pointer at a time, re-reading the program after each, so later ones see earlier ones.
+    for (int round = 0; round < 16; ++round)
+    {
+        if (!introduceOnePointer(result, notKept, options.allowDeadRegisterChanges))
+        {
+            break;
+        }
+    }
+    return result;
+}
+
 } // namespace optimizer
 } // namespace Kites

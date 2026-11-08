@@ -128,16 +128,16 @@ QWidget *OptimizerTab::buildControls()
     row->addWidget(m_unroll);
     m_onlyLiveRegisters = new QCheckBox("Fold addresses", bar);
     m_onlyLiveRegisters->setToolTip(
-        "Let the unrolled copies share one address computation, so a later copy reaches its data\n"
-        "with a larger offset (lw x5, 4(x30)) instead of recomputing the address.\n\n"
+        "Compute each array address once instead of in every iteration:\n"
+        " - a loop that indexes memory (slli t, i, 2; add p, base, t) steps a pointer instead\n"
+        "   (addi p, p, 4), set up once before the loop;\n"
+        " - unrolled copies reach their data from the first copy's address with a larger\n"
+        "   offset (lw x5, 4(p)).\n\n"
         "Registers nothing reads after the loop (like the old index-times-4 temporary) may then\n"
         "end with different values. Memory and every register read later still have to match,\n"
         "and the registers that end differently are listed.");
-    m_onlyLiveRegisters->setEnabled(false);
     row->addWidget(m_onlyLiveRegisters);
     row->addSpacing(10);
-    connect(m_unroll, &QComboBox::currentIndexChanged, this,
-            [this]() { m_onlyLiveRegisters->setEnabled(m_unroll->currentData().toInt() > 1); });
 
     m_plannedLatency = new QSpinBox(bar);
     m_plannedLatency->setRange(0, 40);
@@ -309,7 +309,7 @@ void OptimizerTab::setBusy(bool busy)
     m_pipeline->setEnabled(!busy);
     m_memory->setEnabled(!busy);
     m_unroll->setEnabled(!busy);
-    m_onlyLiveRegisters->setEnabled(!busy && m_unroll->currentData().toInt() > 1);
+    m_onlyLiveRegisters->setEnabled(!busy);
     m_plannedLatency->setEnabled(!busy);
     if (busy)
     {
@@ -362,8 +362,7 @@ void OptimizerTab::suggest()
     request.memory = m_memory->currentIndex() == 1 ? benchmarking::MemorySetup::ColdCache
                                                    : benchmarking::MemorySetup::Ideal;
     request.unrollFactor = m_unroll->currentData().toInt();
-    request.allowDeadRegisterChanges =
-        request.unrollFactor > 1 && m_onlyLiveRegisters->isChecked();
+    request.allowDeadRegisterChanges = m_onlyLiveRegisters->isChecked();
     request.plannedLatency = m_plannedLatency->value();
 
     m_originalView->setTintedLines({});
@@ -473,6 +472,32 @@ void OptimizerTab::suggestionFinished()
                              "function, save and restore it.")
                          .arg(saved.join(", "));
         }
+    }
+    for (const optimizer::PointerReport &pointer : suggestion.result.pointers)
+    {
+        QString note = QString("The loop at lines %1-%2 now steps x%3 by %4 bytes instead of "
+                               "recomputing its address.")
+                           .arg(pointer.firstLine)
+                           .arg(pointer.lastLine)
+                           .arg(pointer.pointer)
+                           .arg(pointer.stride);
+        if (!pointer.changedDeadRegisters.empty())
+        {
+            QStringList changed;
+            for (unsigned reg : pointer.changedDeadRegisters)
+            {
+                changed << QString("x%1").arg(reg);
+            }
+            note += QString(" %1 now end differently: nothing reads them after the loop, so they "
+                            "are not compared.")
+                        .arg(changed.join(", "));
+        }
+        if (optimizer::isCalleeSaved(pointer.pointer))
+        {
+            note += QString(" x%1 is callee-saved: inside a function, save and restore it.")
+                        .arg(pointer.pointer);
+        }
+        notes << note;
     }
     if (!leftAlone.isEmpty())
     {

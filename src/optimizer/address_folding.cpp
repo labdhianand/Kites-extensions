@@ -366,6 +366,7 @@ FoldInstr makeFoldInstr(const InstrInfo &info, const std::map<unsigned, unsigned
     else if (opcode == 0b0100011)
     {
         instr.kind = FoldKind::Store;
+        instr.rd = 0; // those bits hold part of the offset
     }
     else if (info.klass == InstrClass::Branch)
     {

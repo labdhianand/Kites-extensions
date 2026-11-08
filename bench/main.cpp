@@ -70,18 +70,9 @@ const std::vector<VariantInfo> kVariants = {
     {"NH_F", PipelineVariant::NH_F, ProcessorType::RV5Stage_NH_F},
     {"H_F", PipelineVariant::H_F, ProcessorType::RV5Stage_H_F}};
 
-// Registers a result may legitimately leave different: the ones unrolling took into use, and with
-// allowDeadRegisterChanges the ones nothing reads after their loop.
 std::vector<unsigned> notCompared(const OptimizeResult &result)
 {
-    std::vector<unsigned> registers;
-    for (const LoopReport &loop : result.loops)
-    {
-        registers.insert(registers.end(), loop.renamedTo.begin(), loop.renamedTo.end());
-        registers.insert(registers.end(), loop.changedDeadRegisters.begin(),
-                         loop.changedDeadRegisters.end());
-    }
-    return registers;
+    return registersNotCompared(result);
 }
 
 struct Measurement
@@ -124,9 +115,10 @@ void writeMarkdown(const std::filesystem::path &path, const std::vector<Measurem
            "is the optimizer's suggestion. **+ unrolled** also unrolls counted loops by up to "
            "x" << kUnrollFactor
         << ", keeping every register's final value. **+ folded** also lets registers that "
-           "nothing reads after a loop end differently, so the unrolled copies share one address "
-           "computation (`--only-live-registers`). Every version was checked to compute exactly "
-           "what the original computes; registers that only unrolling uses, and for **+ folded** "
+           "nothing reads after a loop end differently, so indexed loops step a pointer and the "
+           "unrolled copies share one address computation (`--only-live-registers`). Every "
+           "version was checked to compute exactly what the original computes; registers that "
+           "only the optimizer uses (copies, pointers), and for **+ folded** "
            "the registers nothing reads after their loop, are not compared.\n";
 
     for (const MemorySetting &setting : kMemorySettings)
