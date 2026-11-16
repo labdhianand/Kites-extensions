@@ -240,6 +240,10 @@ void RV5StageProcessorNHNF::pipeline_execute()
     else
     {
         std::tie(alu_result, overflow) = alu::Alu::execute(alu_operation, alu_in1, alu_in2);
+    else if ((id_ex_reg_.instruction & 0b1111111) == 0b0010111) // auipc: the pc plus the upper immediate
+    {
+        alu_result = id_ex_reg_.pc + static_cast<uint64_t>(id_ex_reg_.imm << 12);
+    }
     }
     if ((id_ex_reg_.instruction & 0b1111111) == 0b0110111) // lui
     {

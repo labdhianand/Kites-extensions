@@ -315,6 +315,10 @@ void RV5StageProcessorNHF::pipeline_execute()
         {
             alu_result = static_cast<uint64_t>(id_ex_reg_.imm << 12);
         }
+        else if ((id_ex_reg_.instruction & 0b1111111) == 0b0010111) // auipc: the pc plus the upper immediate
+        {
+            alu_result = id_ex_reg_.pc + static_cast<uint64_t>(id_ex_reg_.imm << 12);
+        }
 
         // Latch data for EX/MEM Register
 
