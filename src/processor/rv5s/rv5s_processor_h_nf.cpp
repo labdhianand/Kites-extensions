@@ -247,6 +247,10 @@ void RV5StageProcessorHNF::pipeline_execute()
     {
         alu_result = static_cast<uint64_t>(id_ex_reg_.imm << 12);
     }
+    else if ((cur_instruction & 0b1111111) == 0b0010111) // auipc: the pc plus the upper immediate
+    {
+        alu_result = id_ex_reg_.pc + static_cast<uint64_t>(id_ex_reg_.imm << 12);
+    }
 
     ex_mem_reg_.prev_reg_write = ex_mem_reg_.reg_write;
     ex_mem_reg_.prev_rd = ex_mem_reg_.rd;
