@@ -49,6 +49,13 @@ public:
 
     void pushInput(const std::string &input);
 
+    /// The channel the running program prints to and reads from. It stays the same when the
+    /// processor model is switched, so a console showing it keeps working.
+    IoChannel *ioChannel() const
+    {
+        return m_io.get();
+    }
+
     void setStepDelay(unsigned int delay);
 
     void setBreakpoints(const std::vector<uint64_t> &breakpoints);
@@ -74,6 +81,7 @@ private:
     // or -1 if it isn't in the current program's mapping.
     int resolveCurrentSourceLine() const;
 
+    std::shared_ptr<IoChannel> m_io = std::make_shared<IoChannel>();
     AssembledProgram m_currentProgram{};
     std::unique_ptr<ProcessorBase> m_currentProcessor{};
     ProcessorType m_currentProcessorType;
