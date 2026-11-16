@@ -10,6 +10,9 @@
 #include "config/config.h"
 #include "cache/cache.h"
 #include "main_memory.h"
+#include "processor/io_channel.h"
+#include "processor/mmio_console.h"
+#include <memory>
 #include <QObject>
 #include <iostream>
 #include <string>
@@ -29,10 +32,31 @@ class MemoryController : public QObject
     Cache l1_cache_;          ///< The cache object for faster memory access. 
     Cache instruction_cache_; ///< The cache object for instructions.
 
+    std::unique_ptr<ConsoleDevice> console_; ///< The keyboard and display (see mmio_console.h).
+    std::vector<IoEvent> ioEvents_;          ///< What device accesses did since last taken.
+
+    static bool isDevice(uint64_t address)
+    {
+        return address >= kConsoleBase && address < kConsoleBase + kConsoleSize;
+    }
+    [[nodiscard]] uint64_t deviceRead(uint64_t address, unsigned size);
+    void deviceWrite(uint64_t address, uint64_t value, unsigned size);
+
   public:
     MemoryController();
 
     void reset();
+
+    /// Connects the memory-mapped console to a channel (nullptr disconnects it).
+    void setIoChannel(IoChannel *io);
+
+    /// What reads and writes of device registers did since this was last called. The core puts
+    /// it in the step it is recording, so that undo can respect it.
+    std::vector<IoEvent> takeIoEvents();
+
+    /// Puts a byte back as undo or redo needs: like writeByte, except that device registers are
+    /// left alone (undoing a write to the display must not print again).
+    void restoreByte(uint64_t address, uint8_t value);
 
     void writeByte(uint64_t address, uint8_t value);
     void writeHalfWord(uint64_t address, uint16_t value);
