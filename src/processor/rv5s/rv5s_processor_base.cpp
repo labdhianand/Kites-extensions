@@ -18,7 +18,10 @@ void RV5StageVM_Base::Run()
 
         // if we hit a break point (and it's a new PC), we pause execution
         // This prevents firing the same breakpoint multiple times during stalls
-        if (std::find(breakpoints_.begin(), breakpoints_.end(), program_counter_) !=
+        // The breakpoint LoadProgram puts at the end of the program is only a marker: stopping
+        // there would leave the instructions still in the pipeline (an ecall, say) unfinished.
+        if (program_counter_ < program_size_ &&
+            std::find(breakpoints_.begin(), breakpoints_.end(), program_counter_) !=
                 breakpoints_.end() && program_counter_ != last_breakpoint_pc_)
         {
             pause_requested_ = true;
