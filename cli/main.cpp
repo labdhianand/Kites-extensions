@@ -206,6 +206,7 @@ int main(int argc, char *argv[])
     {
         Kites::ProcessorManager manager(nullptr, processorTypeIt->second);
         manager.setStepDelay(0);
+        manager.ioChannel()->useStdio(true); // programs print to and read from the terminal
 
         Kites::command_handler::ReplState state;
         if (!assemblyFile.empty())
@@ -241,6 +242,7 @@ int main(int argc, char *argv[])
     }
 
     Kites::ProcessorManager manager(nullptr, processorTypeIt->second);
+    manager.ioChannel()->useStdio(true); // programs print to and read from the terminal
 
     bool runFailed = false;
     std::string runErrorMsg;
@@ -257,9 +259,6 @@ int main(int argc, char *argv[])
     manager.setStepDelay(0);
     manager.loadProgram(program);
 
-    // Known limitation: a program hitting a blocking read syscall will hang here
-    // forever, since nothing in this CLI feeds terminal stdin into the VM's input
-    // queue yet (that's separate, future work).
     manager.run();
 
     if (runFailed)
