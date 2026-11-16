@@ -23,6 +23,7 @@ enum class Icon
     Compiler,
     Profiler,
     Optimizer,
+    Console,
     Open,
     Save,
     Settings,
