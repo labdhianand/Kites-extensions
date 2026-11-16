@@ -5,6 +5,7 @@
  */
 
 #include "processor/rvss/rvss_processor.h"
+#include "processor/syscall_handler.h"
 
 #include "common/instructions.h"
 #include "config/config.h"
@@ -412,214 +413,27 @@ void RVSSProcessor::ExecuteCsr()
     csr_uimm_ = rs1;
 }
 
-// TODO: implement writeback for syscalls
 void RVSSProcessor::HandleSyscall()
 {
-    uint64_t syscall_number = registers_.ReadGpr(17);
-    switch (syscall_number)
+    const SyscallEffect effect =
+        SyscallHandler::execute(registers_, memory_controller_, *io_, &stop_requested_);
+    if (effect.cancelled)
     {
-    case SYSCALL_PRINT_INT:
+        // Stopped while waiting for input: the ecall did not happen, so the PC goes back to it.
+        program_counter_ -= 4;
+        syscall_cancelled_ = true;
+        return;
+    }
+    if (effect.unknown)
     {
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "[Syscall output: ";
-        }
-        else
-        {
-            std::cout << "VM_STDOUT_START";
-        }
-        std::cout << static_cast<int64_t>(registers_.ReadGpr(10)); // Print signed integer
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "]" << std::endl;
-        }
-        else
-        {
-            std::cout << "VM_STDOUT_END" << std::endl;
-        }
-        break;
+        std::cerr << "Unknown syscall number: " << registers_.ReadGpr(17) << std::endl;
     }
-    case SYSCALL_PRINT_FLOAT:
-    { // print float
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "[Syscall output: ";
-        }
-        else
-        {
-            std::cout << "VM_STDOUT_START";
-        }
-        float float_value;
-        uint64_t raw = registers_.ReadGpr(10);
-        std::memcpy(&float_value, &raw, sizeof(float_value));
-        std::cout << std::setprecision(std::numeric_limits<float>::max_digits10) << float_value;
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "]" << std::endl;
-        }
-        else
-        {
-            std::cout << "VM_STDOUT_END" << std::endl;
-        }
-        break;
-    }
-    case SYSCALL_PRINT_DOUBLE:
-    { // print double
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "[Syscall output: ";
-        }
-        else
-        {
-            std::cout << "VM_STDOUT_START";
-        }
-        double double_value;
-        uint64_t raw = registers_.ReadGpr(10);
-        std::memcpy(&double_value, &raw, sizeof(double_value));
-        std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << double_value;
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "]" << std::endl;
-        }
-        else
-        {
-            std::cout << "VM_STDOUT_END" << std::endl;
-        }
-        break;
-    }
-    case SYSCALL_PRINT_STRING:
+    RecordSyscall(current_delta_, effect);
+    if (effect.exited)
     {
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "[Syscall output: ";
-        }
-        PrintString(registers_.ReadGpr(10)); // Print string
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "]" << std::endl;
-        }
-        break;
-    }
-    case SYSCALL_EXIT:
-    {
-        stop_requested_ = true; // Stop the VM
-        if (!globals::vm_as_backend)
-        {
-            std::cout << "VM_EXIT" << std::endl;
-        }
-        output_status_ = "VM_EXIT";
-        std::cout << "Exited with exit code: " << registers_.ReadGpr(10) << std::endl;
-        exit(0); // Exit the program
-        break;
-    }
-    case SYSCALL_READ:
-    { // Read
-        uint64_t file_descriptor = registers_.ReadGpr(10);
-        uint64_t buffer_address = registers_.ReadGpr(11);
-        uint64_t length = registers_.ReadGpr(12);
-
-        if (file_descriptor == 0)
-        {
-            // Read from stdin
-            std::string input;
-            {
-                std::cout << "VM_STDIN_START" << std::endl;
-                output_status_ = "VM_STDIN_START";
-                std::unique_lock<std::mutex> lock(input_mutex_);
-                input_cv_.wait(lock, [this]() { return !input_queue_.empty(); });
-                output_status_ = "VM_STDIN_END";
-                std::cout << "VM_STDIN_END" << std::endl;
-
-                input = input_queue_.front();
-                input_queue_.pop();
-            }
-
-            std::vector<uint8_t> old_bytes_vec(length, 0);
-            std::vector<uint8_t> new_bytes_vec(length, 0);
-
-            for (size_t i = 0; i < length; ++i)
-            {
-                old_bytes_vec[i] = memory_controller_.peekByte(buffer_address + i);
-            }
-
-            for (size_t i = 0; i < input.size() && i < length; ++i)
-            {
-                memory_controller_.writeByte(buffer_address + i, static_cast<uint8_t>(input[i]));
-            }
-            if (input.size() < length)
-            {
-                memory_controller_.writeByte(buffer_address + input.size(), '\0');
-            }
-
-            for (size_t i = 0; i < length; ++i)
-            {
-                new_bytes_vec[i] = memory_controller_.peekByte(buffer_address + i);
-            }
-
-            current_delta_.memory_changes.push_back({buffer_address, old_bytes_vec, new_bytes_vec});
-
-            uint64_t old_reg = registers_.ReadGpr(10);
-            unsigned int reg_index = 10;
-            unsigned int reg_type = 0; // 0 for GPR, 1 for CSR, 2 for FPR
-            uint64_t new_reg =
-                std::min(static_cast<uint64_t>(length), static_cast<uint64_t>(input.size()));
-            registers_.WriteGpr(10, new_reg);
-            if (old_reg != new_reg)
-            {
-                current_delta_.register_changes.push_back({reg_index, reg_type, old_reg, new_reg});
-            }
-        }
-        else
-        {
-            std::cerr << "Unsupported file descriptor: " << file_descriptor << std::endl;
-        }
-        break;
-    }
-    case SYSCALL_WRITE:
-    { // Write
-        uint64_t file_descriptor = registers_.ReadGpr(10);
-        uint64_t buffer_address = registers_.ReadGpr(11);
-        uint64_t length = registers_.ReadGpr(12);
-
-        if (file_descriptor == 1)
-        { // stdout
-            std::cout << "VM_STDOUT_START";
-            output_status_ = "VM_STDOUT_START";
-            uint64_t bytes_printed = 0;
-            for (uint64_t i = 0; i < length; ++i)
-            {
-                char c = memory_controller_.readByte(buffer_address + i);
-                // if (c == '\0') {
-                //     break;
-                // }
-                std::cout << c;
-                bytes_printed++;
-            }
-            std::cout << std::flush;
-            output_status_ = "VM_STDOUT_END";
-            std::cout << "VM_STDOUT_END" << std::endl;
-
-            uint64_t old_reg = registers_.ReadGpr(10);
-            unsigned int reg_index = 10;
-            unsigned int reg_type = 0; // 0 for GPR, 1 for CSR, 2 for FPR
-            uint64_t new_reg = std::min(static_cast<uint64_t>(length), bytes_printed);
-            registers_.WriteGpr(10, new_reg);
-            if (old_reg != new_reg)
-            {
-                current_delta_.register_changes.push_back({reg_index, reg_type, old_reg, new_reg});
-            }
-        }
-        else
-        {
-            std::cerr << "Unsupported file descriptor: " << file_descriptor << std::endl;
-        }
-        break;
-    }
-    default:
-    {
-        std::cerr << "Unknown syscall number: " << syscall_number << std::endl;
-        break;
-    }
+        exited_ = true;
+        exit_code_ = effect.exitCode;
+        program_counter_ = program_size_; // the program is over
     }
 }
 
@@ -1082,14 +896,25 @@ void RVSSProcessor::DebugRun()
         if (std::find(breakpoints_.begin(), breakpoints_.end(), program_counter_) ==
             breakpoints_.end())
         {
+            if (BlockedOnInput(memory_controller_.readWord_d(program_counter_)))
+            {
+                break;
+            }
             Fetch();
             Decode();
             Execute();
+            if (syscall_cancelled_)
+            {
+                syscall_cancelled_ = false;
+                current_delta_ = RVSingleStageStepDelta();
+                break;
+            }
             WriteMemory();
             WriteBack();
+            CollectDeviceIo(current_delta_);
             instructions_retired_++;
             cycle_s_++;
-            std::cout << "Program Counter: " << program_counter_ << std::endl;
+            std::cerr << "Program Counter: " << program_counter_ << std::endl;
 
             current_delta_.new_pc = program_counter_;
             // history_.push(current_delta_);
@@ -1101,12 +926,12 @@ void RVSSProcessor::DebugRun()
             current_delta_ = RVSingleStageStepDelta();
             if (program_counter_ < program_size_)
             {
-                std::cout << "VM_STEP_COMPLETED" << std::endl;
+                std::cerr << "VM_STEP_COMPLETED" << std::endl;
                 output_status_ = "VM_STEP_COMPLETED";
             }
             else if (program_counter_ >= program_size_)
             {
-                std::cout << "VM_LAST_INSTRUCTION_STEPPED" << std::endl;
+                std::cerr << "VM_LAST_INSTRUCTION_STEPPED" << std::endl;
                 output_status_ = "VM_LAST_INSTRUCTION_STEPPED";
             }
             DumpRegisters(globals::registers_dump_file_path, registers_);
@@ -1120,14 +945,14 @@ void RVSSProcessor::DebugRun()
         }
         else
         {
-            std::cout << "VM_BREAKPOINT_HIT " << program_counter_ << std::endl;
+            std::cerr << "VM_BREAKPOINT_HIT " << program_counter_ << std::endl;
             output_status_ = "VM_BREAKPOINT_HIT";
             break;
         }
     }
     if (program_counter_ >= program_size_)
     {
-        std::cout << "VM_PROGRAM_END" << std::endl;
+        std::cerr << "VM_PROGRAM_END" << std::endl;
         output_status_ = "VM_PROGRAM_END";
     }
     DumpRegisters(globals::registers_dump_file_path, registers_);
@@ -1139,14 +964,25 @@ void RVSSProcessor::Step()
     current_delta_.old_pc = program_counter_;
     if (program_counter_ < program_size_)
     {
+        if (BlockedOnInput(memory_controller_.readWord_d(program_counter_)))
+        {
+            return; // nothing happens until the input is typed
+        }
         Fetch();
         Decode();
         Execute();
+        if (syscall_cancelled_)
+        {
+            syscall_cancelled_ = false;
+            current_delta_ = RVSingleStageStepDelta();
+            return;
+        }
         WriteMemory();
         WriteBack();
+        CollectDeviceIo(current_delta_);
         instructions_retired_++;
         cycle_s_++;
-        std::cout << "Program Counter: " << std::hex << program_counter_ << std::dec << std::endl;
+        std::cerr << "Program Counter: " << std::hex << program_counter_ << std::dec << std::endl;
 
         current_delta_.new_pc = program_counter_;
 
@@ -1162,18 +998,18 @@ void RVSSProcessor::Step()
 
         if (program_counter_ < program_size_)
         {
-            std::cout << "VM_STEP_COMPLETED" << std::endl;
+            std::cerr << "VM_STEP_COMPLETED" << std::endl;
             output_status_ = "VM_STEP_COMPLETED";
         }
         else if (program_counter_ >= program_size_)
         {
-            std::cout << "VM_LAST_INSTRUCTION_STEPPED" << std::endl;
+            std::cerr << "VM_LAST_INSTRUCTION_STEPPED" << std::endl;
             output_status_ = "VM_LAST_INSTRUCTION_STEPPED";
         }
     }
     else if (program_counter_ >= program_size_)
     {
-        std::cout << "VM_PROGRAM_END" << std::endl;
+        std::cerr << "VM_PROGRAM_END" << std::endl;
         output_status_ = "VM_PROGRAM_END";
     }
     DumpRegisters(globals::registers_dump_file_path, registers_);
@@ -1186,7 +1022,7 @@ void RVSSProcessor::Undo()
     qInfo() << "Attempting to undo last step in rvss";
     if (undo_stack_.empty())
     {
-        std::cout << "VM_NO_MORE_UNDO" << std::endl;
+        std::cerr << "VM_NO_MORE_UNDO" << std::endl;
         output_status_ = "VM_NO_MORE_UNDO";
         return;
     }
@@ -1223,19 +1059,20 @@ void RVSSProcessor::Undo()
     {
         for (size_t i = 0; i < change.old_bytes_vec.size(); ++i)
         {
-            memory_controller_.writeByte(change.address + i, change.old_bytes_vec[i]);
+            memory_controller_.restoreByte(change.address + i, change.old_bytes_vec[i]);
         }
     }
 
+    UndoIo(last);
     program_counter_ = last.old_pc;
     instructions_retired_--;
     cycle_s_--;
-    std::cout << "Program Counter: " << program_counter_ << std::endl;
+    std::cerr << "Program Counter: " << program_counter_ << std::endl;
 
     redo_stack_.push(last);
 
     output_status_ = "VM_UNDO_COMPLETED";
-    std::cout << "VM_UNDO_COMPLETED" << std::endl;
+    std::cerr << "VM_UNDO_COMPLETED" << std::endl;
 
     DumpRegisters(globals::registers_dump_file_path, registers_);
     DumpState(globals::vm_state_dump_file_path);
@@ -1252,7 +1089,7 @@ void RVSSProcessor::Redo()
     qInfo() << "Attempting to redo last undone step in rvss";
     if (redo_stack_.empty())
     {
-        std::cout << "VM_NO_MORE_REDO" << std::endl;
+        std::cerr << "VM_NO_MORE_REDO" << std::endl;
         return;
     }
 
@@ -1295,16 +1132,17 @@ void RVSSProcessor::Redo()
     {
         for (size_t i = 0; i < change.new_bytes_vec.size(); ++i)
         {
-            memory_controller_.writeByte(change.address + i, change.new_bytes_vec[i]);
+            memory_controller_.restoreByte(change.address + i, change.new_bytes_vec[i]);
         }
     }
 
+    RedoIo(next);
     program_counter_ = next.new_pc;
     instructions_retired_++;
     cycle_s_++;
     DumpRegisters(globals::registers_dump_file_path, registers_);
     DumpState(globals::vm_state_dump_file_path);
-    std::cout << "Program Counter: " << program_counter_ << std::endl;
+    std::cerr << "Program Counter: " << program_counter_ << std::endl;
     undo_stack_.push(next);
 
     SetActiveWireNames();
@@ -1321,6 +1159,7 @@ void RVSSProcessor::Reset()
     last_breakpoint_pc_ = UINT64_MAX; // Clear breakpoint tracking on reset
     registers_.Reset();
     memory_controller_.reset();
+    ResetIo();
     control_unit_.Reset();
     branch_flag_ = false;
     next_pc_ = 0;
