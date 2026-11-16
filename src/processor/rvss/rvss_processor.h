@@ -39,6 +39,7 @@ class RVSSProcessor : public ProcessorBase
     uint64_t return_address_{};
 
     bool branch_flag_ = false;
+    bool syscall_cancelled_ = false; // an ecall was stopped while it waited for input
     int64_t next_pc_{}; // for jal, jalr,
 
     // CSR intermediate variables

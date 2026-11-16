@@ -4,6 +4,7 @@
  * @author Vishank Singh, https://VishankSingh
  */
 
+#include "processor/syscall_handler.h"
 #include "processor/processor_base.h"
 #include "common/globals.h"
 #include "config/config.h"
@@ -20,12 +21,100 @@ namespace Kites
 {
 ProcessorBase::ProcessorBase()
 {
+    memory_controller_.setIoChannel(io_.get());
+}
+
+void ProcessorBase::SetIoChannel(std::shared_ptr<IoChannel> io)
+{
+    io_ = std::move(io);
+    memory_controller_.setIoChannel(io_.get());
+}
+
+void ProcessorBase::RecordSyscall(StepDelta &delta, const SyscallEffect &effect)
+{
+    delta.register_changes.insert(delta.register_changes.end(), effect.registerChanges.begin(),
+                                  effect.registerChanges.end());
+    delta.memory_changes.insert(delta.memory_changes.end(), effect.memoryChanges.begin(),
+                                effect.memoryChanges.end());
+    if (effect.io)
+    {
+        delta.io_events.push_back(*effect.io);
+    }
+    delta.exited = effect.exited;
+    delta.exit_code = effect.exitCode;
+}
+
+void ProcessorBase::UndoIo(const StepDelta &delta)
+{
+    // Newest first, like everything else in an undo.
+    for (auto it = delta.io_events.rbegin(); it != delta.io_events.rend(); ++it)
+    {
+        if (it->kind == IoEvent::Kind::Output)
+        {
+            io_->retractOutput(it->text.size());
+        }
+        else
+        {
+            io_->unread(it->text);
+        }
+    }
+    if (delta.exited)
+    {
+        exited_ = false;
+    }
+}
+
+void ProcessorBase::RedoIo(const StepDelta &delta)
+{
+    for (const auto &event : delta.io_events)
+    {
+        if (event.kind == IoEvent::Kind::Output)
+        {
+            io_->replayOutput(event.text);
+        }
+        else
+        {
+            io_->discard(event.text.size());
+        }
+    }
+    if (delta.exited)
+    {
+        exited_ = true;
+        exit_code_ = delta.exit_code;
+    }
+}
+
+void ProcessorBase::CollectDeviceIo(StepDelta &delta)
+{
+    for (auto &event : memory_controller_.takeIoEvents())
+    {
+        delta.io_events.push_back(std::move(event));
+    }
+}
+
+bool ProcessorBase::BlockedOnInput(uint32_t instruction)
+{
+    constexpr uint32_t kEcall = 0x00000073;
+    if (instruction != kEcall || io_->blocking() || !SyscallHandler::wouldWait(registers_, *io_))
+    {
+        return false;
+    }
+    emit io_->inputRequested(true);
+    return true;
+}
+
+void ProcessorBase::ResetIo()
+{
+    io_->clearOutput();
+    exited_ = false;
+    exit_code_ = 0;
 }
 
 void ProcessorBase::RequestStop()
 {
     QMutexLocker locker(&pause_mutex_);
     stop_requested_ = true;
+    io_->wakeReaders(); // a program waiting for input must notice
     pause_wait_condition_.wakeAll();
     Reset();
 }
@@ -321,18 +410,6 @@ void ProcessorBase::RemoveBreakpoint(uint64_t val, bool is_line)
 bool ProcessorBase::CheckBreakpoint(uint64_t address)
 {
     return std::find(breakpoints_.begin(), breakpoints_.end(), address) != breakpoints_.end();
-}
-
-void ProcessorBase::PrintString(uint64_t address)
-{
-    while (true)
-    {
-        char c = memory_controller_.readByte(address);
-        if (c == '\0')
-            break;
-        std::cout << c;
-        address++;
-    }
 }
 
 void ProcessorBase::DumpState(const std::filesystem::path &filename)

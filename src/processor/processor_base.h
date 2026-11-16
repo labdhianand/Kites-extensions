@@ -9,6 +9,7 @@
 #include "alu.h"
 #include "common/assembled_program.h"
 #include "memory_controller.h"
+#include "processor/io_channel.h"
 #include "processor/memory_timing.h"
 #include "processor/processor_state.h"
 #include "processor/registers.h"
@@ -34,17 +35,7 @@
 
 namespace Kites
 {
-
-enum SyscallCode
-{
-    SYSCALL_PRINT_INT    = 1,
-    SYSCALL_PRINT_FLOAT  = 2,
-    SYSCALL_PRINT_DOUBLE = 3,
-    SYSCALL_PRINT_STRING = 4,
-    SYSCALL_EXIT         = 10,
-    SYSCALL_READ         = 63,
-    SYSCALL_WRITE        = 64,
-};
+struct SyscallEffect;
 
 struct RegisterChange
 {
@@ -75,6 +66,11 @@ struct StepDelta
     unsigned int new_branch_mispredictions{};
     std::vector<RegisterChange> register_changes{};
     std::vector<MemoryChange> memory_changes{};
+    /// What the step printed or read, so that undo and redo can respect it (see io_channel.h).
+    std::vector<IoEvent> io_events{};
+    /// Set if the step was an exit syscall.
+    bool exited{false};
+    int exit_code{0};
 };
 
 /**
@@ -94,9 +90,13 @@ class ProcessorBase : public QObject
     QMutex pause_mutex_;
     QWaitCondition pause_wait_condition_;
 
-    std::mutex input_mutex_;
-    std::condition_variable input_cv_;
-    std::queue<std::string> input_queue_;
+    /// Where ecalls and the memory-mapped console print and read. Owned jointly with whoever shows
+    /// it (the GUI console, the CLI), so it outlives the processor when the model is switched.
+    std::shared_ptr<IoChannel> io_ = std::make_shared<IoChannel>();
+
+    /// Set once the program has made an exit syscall; the machine then counts as finished.
+    bool exited_{false};
+    int exit_code_{0};
 
     std::vector<uint64_t> breakpoints_;
     std::optional<uint64_t> last_breakpoint_pc_{std::nullopt}; // Track last PC where we paused at breakpoint
@@ -158,7 +158,25 @@ class ProcessorBase : public QObject
     virtual void SetActiveWireNames() = 0;
     virtual void setProcessorState() = 0;
 
-    void PrintString(uint64_t address);
+    /// Replaces the I/O channel (the processor and its memory both use the new one).
+    void SetIoChannel(std::shared_ptr<IoChannel> io);
+    IoChannel &Io()
+    {
+        return *io_;
+    }
+
+    /// Puts what a syscall did into the step being recorded.
+    void RecordSyscall(StepDelta &delta, const SyscallEffect &effect);
+    /// Undo / redo of the I/O of a step: takes back output and gives back input, or the reverse.
+    void UndoIo(const StepDelta &delta);
+    void RedoIo(const StepDelta &delta);
+    /// Moves what reads and writes of the memory-mapped console did this step into the record.
+    void CollectDeviceIo(StepDelta &delta);
+    /// True if the instruction at `pc` is an ecall that would have to wait for input that has not
+    /// been typed, and this machine may not wait (the GUI's Step). Tells the console to ask.
+    bool BlockedOnInput(uint32_t instruction);
+    /// Clears the console output and the exit state (Reset).
+    void ResetIo();
 
     virtual void Run()      = 0;
     virtual void DebugRun() = 0;
@@ -169,11 +187,10 @@ class ProcessorBase : public QObject
     void DumpState(const std::filesystem::path &filename);
 
     void ModifyRegister(const std::string &reg_name, uint64_t value);
+    /// Types a line of input for the program (what the console's Enter does).
     void PushInput(const std::string &input)
     {
-        std::lock_guard<std::mutex> lock(input_mutex_);
-        input_queue_.push(input);
-        input_cv_.notify_one();
+        io_->pushLine(input);
     }
   signals:
     // vm state will have all the info like pc,cycles, control signals
