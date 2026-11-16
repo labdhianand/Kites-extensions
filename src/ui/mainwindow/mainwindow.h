@@ -34,6 +34,7 @@ class MainWindow : public QMainWindow
         CompilerTabIndex,
         ProfilerTabIndex,
         OptimizerTabIndex,
+        ConsoleTabIndex,
         TabCount
     };
 
