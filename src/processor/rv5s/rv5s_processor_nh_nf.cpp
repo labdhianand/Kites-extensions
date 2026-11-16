@@ -166,7 +166,7 @@ void RV5StageProcessorNHNF::Reset()
 
 void RV5StageProcessorNHNF::Step()
 {
-    if (wait_for_blocking_load())
+    if (wait_for_blocking_load() || wait_for_input())
     {
         return;
     }
@@ -203,13 +203,8 @@ void RV5StageProcessorNHNF::pipeline_execute()
     uint8_t opcode = instruction & 0b1111111;
     uint8_t funct3 = (instruction >> 12) & 0x7;
 
-    if (opcode == 0b1110011 && funct3 == 0b000)
-    {
-        handle_syscall();
-        return;
-    }
-
-    if (opcode == 0b1110011)
+    // An ecall passes through like any instruction; it does its work when it retires.
+    if (opcode == 0b1110011 && funct3 != 0b000)
     {
         execute_csr();
         return;
@@ -240,14 +235,14 @@ void RV5StageProcessorNHNF::pipeline_execute()
     else
     {
         std::tie(alu_result, overflow) = alu::Alu::execute(alu_operation, alu_in1, alu_in2);
-    else if ((id_ex_reg_.instruction & 0b1111111) == 0b0010111) // auipc: the pc plus the upper immediate
-    {
-        alu_result = id_ex_reg_.pc + static_cast<uint64_t>(id_ex_reg_.imm << 12);
-    }
     }
     if ((id_ex_reg_.instruction & 0b1111111) == 0b0110111) // lui
     {
         alu_result = static_cast<uint64_t>(id_ex_reg_.imm << 12);
+    }
+    else if ((id_ex_reg_.instruction & 0b1111111) == 0b0010111) // auipc: the pc plus the upper immediate
+    {
+        alu_result = id_ex_reg_.pc + static_cast<uint64_t>(id_ex_reg_.imm << 12);
     }
 
     // Latch data for EX/MEM Register
@@ -336,17 +331,6 @@ void RV5StageProcessorNHNF::pipeline_execute()
 }
 
 // --- Undo/Redo Implementations ---
-
-void RV5StageProcessorNHNF::handle_syscall()
-{
-    if ((id_ex_reg_.instruction & 0x7F) == 0b1110011 &&
-        ((id_ex_reg_.instruction >> 12) & 0x7) == 0b000)
-    {
-        RequestStop();
-        output_status_ = "ECALL_EXIT";
-        DumpState("vm_state.json");
-    }
-}
 
 // --- FP Execute Handlers ---
 

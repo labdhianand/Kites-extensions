@@ -74,6 +74,5 @@ class RV5StageProcessorNHNF : public RV5StageVM_Base
 
     // --- Specialized handler functions (called from pipeline stages) ---
 
-    void handle_syscall() override;
 };
 }//namespace Kites
