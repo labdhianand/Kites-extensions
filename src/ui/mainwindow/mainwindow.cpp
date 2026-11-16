@@ -11,6 +11,7 @@
 #include "ui/editor_tab/editortab.h"
 #include "ui/memory_tab/memorytab.h"
 #include "ui/optimizer_tab/optimizertab.h"
+#include "ui/console_tab/consoletab.h"
 #include "ui/processor_tab/processortab.h"
 #include "ui/profiler_tab/profilertab.h"
 #include "ui/theme/icon_manager.h"
@@ -292,6 +293,7 @@ void MainWindow::setUpSidebar()
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Compiler), "Compiler"));
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Profiler), "Profiler"));
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Optimizer), "Optimizer"));
+    m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Console), "Console"));
     m_sidebar->setIconSize(QSize(20, 20));
     // Never squeeze the labels away: a wide page should not eat into the sidebar.
     m_sidebar->setMinimumWidth(sidebarWidth());
@@ -460,7 +462,14 @@ void MainWindow::setUpTabs()
     m_stackedTabs->addWidget(m_tabs[TabIndex::CacheTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::CompilerTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::ProfilerTabIndex]);
+    auto *consoleTab                    = new ConsoleTab(m_processorManager->ioChannel(), this);
+    m_tabs[TabIndex::ConsoleTabIndex]   = consoleTab;
+    // A program that asks for input cannot go on until it gets it, so show where to type it.
+    connect(consoleTab, &ConsoleTab::inputWanted, this,
+            [this]() { m_sidebar->setCurrentRow(TabIndex::ConsoleTabIndex); });
+
     m_stackedTabs->addWidget(m_tabs[TabIndex::OptimizerTabIndex]);
+    m_stackedTabs->addWidget(m_tabs[TabIndex::ConsoleTabIndex]);
 }
 
 bool MainWindow::tryParseAndLoadProgram()
@@ -553,6 +562,7 @@ void MainWindow::processorChanged(const ProcessorType &vmType)
     {
         optimizerTab->setProcessor(vmType);
     }
+    // The channel is the manager's, so the console keeps working; nothing to reconnect.
     emit processorChangedSignal();
 
     // well also have to change the processor design from here later
@@ -648,7 +658,7 @@ void MainWindow::themeChangedSlot([[maybe_unused]] const QString &themeId)
     // sidebar icons
     static const std::array<Icon, toIndex(TabIndex::TabCount)> sidebarIcons = {
         Icon::Editor, Icon::Memory, Icon::Processor, Icon::Cache, Icon::Compiler, Icon::Profiler,
-        Icon::Optimizer};
+        Icon::Optimizer, Icon::Console};
     for (int row = 0; row < m_sidebar->count(); ++row)
     {
         if (row < static_cast<int>(sidebarIcons.size()))
