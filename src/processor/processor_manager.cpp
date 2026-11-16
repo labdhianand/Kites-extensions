@@ -34,6 +34,7 @@ ProcessorManager::ProcessorManager(QObject *parent, ProcessorType vmType) : QObj
     ProcessorFactory::RegisterVM<RV5StageProcessorHF>(ProcessorType::RV5Stage_H_F);
     m_currentProcessorType = vmType;
     m_currentProcessor = ProcessorFactory::createVM(vmType);
+    m_currentProcessor->SetIoChannel(m_io);
     connect(m_currentProcessor.get(), &ProcessorBase::processorClockedSignal, this,
             &ProcessorManager::processorStateChangedSignal, Qt::DirectConnection);
     connect(m_currentProcessor.get(), &ProcessorBase::processorPausedAtBreakpointSignal, this,
@@ -53,6 +54,7 @@ void ProcessorManager::changeProcessor(ProcessorType vmType)
 {
     m_currentProcessorType = vmType;
     m_currentProcessor = ProcessorFactory::createVM(vmType);
+    m_currentProcessor->SetIoChannel(m_io);
     m_currentProcessor->step_delay_ = m_stepDelayMs;
     connect(m_currentProcessor.get(), &ProcessorBase::processorClockedSignal, this,
             &ProcessorManager::processorStateChangedSignal, Qt::DirectConnection);
@@ -193,12 +195,17 @@ void ProcessorManager::run()
 
 void ProcessorManager::step()
 {
+    // Step runs on the thread that has the window, so a program asking for input must not wait
+    // for it here, or the console could never deliver it. It does nothing until input arrives.
+    m_io->setBlocking(false);
     try
     {
         m_currentProcessor->Step();
+        m_io->setBlocking(true);
     }
     catch (const std::exception &e)
     {
+        m_io->setBlocking(true);
         emit runErrorSignal(QString::fromStdString(e.what()), resolveCurrentSourceLine());
     }
 }
