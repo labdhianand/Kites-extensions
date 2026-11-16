@@ -63,6 +63,5 @@ class RV5StageProcessorHNF : public RV5StageVM_Base
     // Helper function to consolidate hazard checks using the dedicated unit
 
     // void print_pipeline_registers_debug();
-    void handle_syscall() override;
 };
 }//namespace Kites

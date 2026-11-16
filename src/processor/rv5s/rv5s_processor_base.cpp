@@ -1,3 +1,4 @@
+#include "processor/syscall_handler.h"
 #include "common/debug_colors.h"
 #include "common/instructions.h"
 #include "processor/rv5s/rv5s_processor_base.h"
@@ -81,7 +82,7 @@ void RV5StageVM_Base::DebugRun()
         print_pipeline_registers_debug();
 #endif
         Step();
-        std::cout << "Cycle: " << cycle_s_ << " | PC: 0x" << std::hex << program_counter_
+        std::cerr << "Cycle: " << cycle_s_ << " | PC: 0x" << std::hex << program_counter_
                   << std::dec << std::endl;
     }
 #ifdef VM_DEBUG_PRINTS
@@ -101,6 +102,7 @@ void RV5StageVM_Base::Reset()
 
     registers_.Reset();
     memory_controller_.reset();
+    ResetIo();
     control_unit_.Reset();
 
     if_id_reg_.reset();
@@ -131,6 +133,7 @@ void RV5StageVM_Base::begin_step_delta()
 
 void RV5StageVM_Base::finalize_step_delta()
 {
+    CollectDeviceIo(current_delta_);
     current_delta_.new_pc                    = program_counter_;
     current_delta_.new_cycle                 = cycle_s_;
     current_delta_.new_stall_cycles          = stall_cycles_;
@@ -579,6 +582,50 @@ void RV5StageVM_Base::pipeline_memory()
     }
 }
 
+bool RV5StageVM_Base::wait_for_input()
+{
+    return mem_wb_reg_.pc != INVALID_PC && is_ecall(mem_wb_reg_.instruction) &&
+           BlockedOnInput(mem_wb_reg_.instruction);
+}
+
+// An ecall does its work when it retires. By then every older instruction has written its
+// registers, so a7 and a0 are final whatever the pipeline's hazard handling, and the pipelines
+// without forwarding or interlocks need no padding around it.
+//
+// What it costs is that the instructions fetched behind it have already read their registers,
+// possibly before the ecall changed a0. A real core takes a trap for the same reason. So they are
+// thrown away and fetched again, like the wrong-path instructions after a taken branch.
+void RV5StageVM_Base::retire_ecall()
+{
+    const SyscallEffect effect =
+        SyscallHandler::execute(registers_, memory_controller_, *io_, &stop_requested_);
+    if (effect.cancelled)
+    {
+        instructions_retired_--; // stopped while waiting for input: it did not run
+        return;
+    }
+    if (effect.unknown)
+    {
+        std::cerr << "Unknown syscall number: " << registers_.ReadGpr(17) << std::endl;
+    }
+    RecordSyscall(current_delta_, effect);
+
+    if_id_reg_.reset();
+    id_ex_reg_.reset();
+    ex_mem_reg_.reset();
+    stall_cycles_ = 0;
+    if (effect.exited)
+    {
+        exited_ = true;
+        exit_code_ = effect.exitCode;
+        redirect_pc(program_size_); // the program is over
+    }
+    else
+    {
+        redirect_pc(mem_wb_reg_.pc + 4);
+    }
+}
+
 void RV5StageVM_Base::pipeline_writeback()
 {
     // Every real instruction reaching WB retires, whether or not it writes a register
@@ -586,6 +633,11 @@ void RV5StageVM_Base::pipeline_writeback()
     if (mem_wb_reg_.pc != INVALID_PC)
     {
         instructions_retired_++;
+        if (is_ecall(mem_wb_reg_.instruction))
+        {
+            retire_ecall();
+            return;
+        }
     }
 
     if (!mem_wb_reg_.reg_write)
@@ -958,10 +1010,11 @@ void RV5StageVM_Base::Undo()
         {
             // Through the cache, like the store being undone: bypassing it would leave the
             // new value in a dirty L1 line, where every later read still sees it.
-            memory_controller_.writeByte(change.address + i, change.old_bytes_vec[i]);
+            memory_controller_.restoreByte(change.address + i, change.old_bytes_vec[i]);
         }
     }
 
+    UndoIo(last);
     program_counter_ = last.old_pc;
     cycle_s_ = last.old_cycle;
     instructions_retired_ = last.old_instructions_retired;
@@ -1019,10 +1072,11 @@ void RV5StageVM_Base::Redo()
     {
         for (size_t i = 0; i < change.new_bytes_vec.size(); ++i)
         {
-            memory_controller_.writeByte(change.address + i, change.new_bytes_vec[i]);
+            memory_controller_.restoreByte(change.address + i, change.new_bytes_vec[i]);
         }
     }
 
+    RedoIo(next);
     program_counter_ = next.new_pc;
     cycle_s_ = next.new_cycle;
     instructions_retired_ = next.new_instructions_retired;

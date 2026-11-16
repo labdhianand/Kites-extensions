@@ -146,7 +146,7 @@ void RV5StageProcessorHNF::Reset()
 
 void RV5StageProcessorHNF::Step()
 {
-    if (wait_for_blocking_load())
+    if (wait_for_blocking_load() || wait_for_input())
     {
         return;
     }
@@ -286,7 +286,7 @@ void RV5StageProcessorHNF::pipeline_execute()
         switch (funct3)
         {
         case 0b000:
-            std::cout << "BEQ check: " << alu_result << std::endl;
+            std::cerr << "BEQ check: " << alu_result << std::endl;
             condition_met = (alu_result == 0);
             break;
         case 0b001:
@@ -311,8 +311,8 @@ void RV5StageProcessorHNF::pipeline_execute()
             ex_mem_reg_.branch_taken = true;
             ex_mem_reg_.branch_target_pc = id_ex_reg_.pc + id_ex_reg_.imm;
             // program_counter_ = ex_mem_reg_.branch_target_pc;
-            std::cout << "Jump size: " << id_ex_reg_.imm << std::endl;
-            std::cout << "Branch taken to PC: 0x" << std::hex << ex_mem_reg_.branch_target_pc
+            std::cerr << "Jump size: " << id_ex_reg_.imm << std::endl;
+            std::cerr << "Branch taken to PC: 0x" << std::hex << ex_mem_reg_.branch_target_pc
                       << std::dec << std::endl;
         }
     }
@@ -332,16 +332,6 @@ void RV5StageProcessorHNF::pipeline_execute()
         redirect_pc(jump_target);
         if_id_reg_.reset();
         ex_mem_reg_.branch_taken = true;
-    }
-}
-
-void RV5StageProcessorHNF::handle_syscall()
-{
-    if ((id_ex_reg_.instruction & 0x7F) == 0b1110011 &&
-        ((id_ex_reg_.instruction >> 12) & 0x7) == 0b000)
-    {
-        RequestStop();
-        output_status_ = "ECALL_EXIT";
     }
 }
 

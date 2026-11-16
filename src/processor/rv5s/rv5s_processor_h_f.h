@@ -65,6 +65,5 @@ class RV5StageProcessorHF : public RV5StageVM_Base
     // Helper function to consolidate hazard checks (now only Load-Use)
 
     // void print_pipeline_registers_debug();
-    void handle_syscall() override;
 };
 }//namespace Kites

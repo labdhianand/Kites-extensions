@@ -141,7 +141,16 @@ class RV5StageVM_Base : public ProcessorBase
     void pipeline_writeback_float();
     void pipeline_writeback_double();
 
-    // --- Specialized handler functions (called from pipeline stages) ---
-    virtual void handle_syscall() = 0;
+    // An ecall runs when it retires (see retire_ecall), so the execute stage has nothing to do for
+    // it.
+    static bool is_ecall(uint32_t instruction)
+    {
+        return instruction == 0x00000073;
+    }
+    void retire_ecall();
+
+    // True if the ecall about to retire needs input that has not been typed and this machine may
+    // not wait for it (the GUI's Step). Nothing happens that cycle. Every Step() calls this first.
+    bool wait_for_input();
 };
 }//namespace Kites

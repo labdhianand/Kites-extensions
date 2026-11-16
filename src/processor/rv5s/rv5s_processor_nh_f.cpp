@@ -172,7 +172,7 @@ void RV5StageProcessorNHF::Reset()
 
 void RV5StageProcessorNHF::Step()
 {
-    if (wait_for_blocking_load())
+    if (wait_for_blocking_load() || wait_for_input())
     {
         return;
     }
@@ -630,14 +630,4 @@ uint64_t RV5StageProcessorNHF::pipeline_execute_double()
     return alu_result;
 }
 
-void RV5StageProcessorNHF::handle_syscall()
-{
-    if ((id_ex_reg_.instruction & 0x7F) == 0b1110011 &&
-        ((id_ex_reg_.instruction >> 12) & 0x7) == 0b000)
-    {
-        RequestStop();
-        output_status_ = "ECALL_EXIT";
-        DumpState("vm_state.json");
-    }
-}
 }//namespace Kites

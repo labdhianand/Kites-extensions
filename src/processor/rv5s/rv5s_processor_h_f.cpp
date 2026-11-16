@@ -201,7 +201,7 @@ void RV5StageProcessorHF::Reset()
 
 void RV5StageProcessorHF::Step()
 {
-    if (wait_for_blocking_load())
+    if (wait_for_blocking_load() || wait_for_input())
     {
         return;
     }
@@ -467,17 +467,6 @@ void RV5StageProcessorHF::pipeline_execute()
         redirect_pc(jump_target);
         if_id_reg_.reset();
         ex_mem_reg_.branch_taken = true;
-    }
-}
-
-void RV5StageProcessorHF::handle_syscall()
-{
-    if ((id_ex_reg_.instruction & 0x7F) == 0b1110011 &&
-        ((id_ex_reg_.instruction >> 12) & 0x7) == 0b000)
-    {
-        RequestStop();
-        output_status_ = "ECALL_EXIT";
-        // DumpState("vm_state.json");
     }
 }
 
