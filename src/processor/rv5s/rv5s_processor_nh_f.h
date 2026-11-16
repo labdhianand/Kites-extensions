@@ -57,6 +57,5 @@ class RV5StageProcessorNHF : public RV5StageVM_Base
     //  void pipeline_writeback() override;
 
     // void print_pipeline_registers_debug();
-    void handle_syscall() override;
 };
 }//namespace Kites
