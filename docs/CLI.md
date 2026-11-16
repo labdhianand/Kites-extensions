@@ -174,22 +174,14 @@ it).
 For measurements across many programs and all four pipelines, see `kites-bench` and
 [BENCHMARKS.md](BENCHMARKS.md).
 
-## Program output during the run
+## Program input and output
 
-Programs that execute `ecall` for I/O print directly to the CLI's stdout
-while running, wrapped in a marker so it's easy to spot in mixed output:
+Programs print to the terminal's stdout and read from its stdin, on every `--vm`. For example
+`printf '3 4\n' | kites-cli examples/io/add_two_numbers.s` prints `Sum = 7`. The simulator's own
+trace lines (`Program Counter: ...`, `VM_STEP_COMPLETED`) go to stderr, so stdout carries only what
+the program prints (plus the summary lines at the end).
 
-```
-[Syscall output: <value or string>]
-```
-
-`PRINT_INT` (`a7=1`), `PRINT_FLOAT` (`a7=2`), `PRINT_DOUBLE` (`a7=3`), and
-`PRINT_STRING` (`a7=4`) all print this way; `EXIT` (`a7=10`) prints
-`Exited with exit code: <code>`.
-
-**Known limitation:** a program that hits a blocking `READ` syscall (`a7=63`)
-will hang forever — the CLI doesn't yet feed terminal stdin into the VM's
-input queue. Avoid programs that read from stdin until this is implemented.
+The syscalls and the memory-mapped keyboard/display are described in [IO.md](IO.md).
 
 ## Output files
 
