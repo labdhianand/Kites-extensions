@@ -231,10 +231,11 @@ void MainWindow::setUpToolBar()
             [this](int value) { m_processorManager->setStepDelay(value); });
 
     connect(pauseAction, &QAction::triggered, this,
-            [this, pauseAction, undoAction, redoAction]()
+            [this, pauseAction, stepAction, undoAction, redoAction]()
             {
                 if (pauseAction->text() == "Pause")
                 {
+                    stepAction->setEnabled(true); // paused: single-step, or go back and forth
                     pauseAction->setText("Resume");
                     pauseAction->setIcon(IconManager::getInstance().getIcon(Icon::Resume));
                     pauseAction->setToolTip("Resume execution");
@@ -247,6 +248,7 @@ void MainWindow::setUpToolBar()
                     pauseAction->setText("Pause");
                     pauseAction->setIcon(IconManager::getInstance().getIcon(Icon::Pause));
                     pauseAction->setToolTip("Pause execution");
+                    stepAction->setDisabled(true);
                     undoAction->setDisabled(true);
                     redoAction->setDisabled(true);
                     m_processorManager->resume();
@@ -255,11 +257,15 @@ void MainWindow::setUpToolBar()
 
     // we also connect the vm paused at breakpoint signal to change the pause button text
     connect(m_processorManager, &ProcessorManager::processorPausedAtBreakpointSignal, this,
-            [this, pauseAction]()
+            [this, pauseAction, stepAction, undoAction, redoAction]()
             {
                 pauseAction->setText("Resume");
                 pauseAction->setIcon(IconManager::getInstance().getIcon(Icon::Resume));
                 pauseAction->setToolTip("Resume execution");
+                // stopped at a breakpoint is paused like any other: stepping and undo work
+                stepAction->setEnabled(true);
+                undoAction->setEnabled(true);
+                redoAction->setEnabled(true);
             });
 
     connect(stepAction, &QAction::triggered, this, [this]() { m_processorManager->step(); });
@@ -601,9 +607,10 @@ void MainWindow::runFinishedSlot()
             // in case we stop while paused
         }
 
-        if (action->text() == "Pause" || action->text() == "Stop")
+        if (action->text() == "Pause" || action->text() == "Stop" || action->text() == "Step" ||
+            action->text() == "Undo" || action->text() == "Redo")
         {
-            action->setDisabled(true);
+            action->setDisabled(true); // nothing is running, so there is nothing to step or undo
         }
     }
 
