@@ -32,6 +32,10 @@ struct SuggestOptions
     /// Run the original and the suggestion on the simulator and compare them.
     bool verify{true};
 
+    /// A file with what the user would type, for a program that reads input (--input). Every run
+    /// of the original and of the suggestion gets it.
+    std::string inputFile;
+
     /// If set, the suggested program is written here.
     std::string outputFile;
 };
