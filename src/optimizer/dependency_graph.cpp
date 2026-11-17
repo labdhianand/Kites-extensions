@@ -212,8 +212,15 @@ DependencyGraph buildDependencyGraph(const ProgramModel &model, const BasicBlock
         {
             for (const MemoryAccess &previous : previousAccesses)
             {
-                if (previous.node == node || (!previous.isStore && !current.isStore) ||
-                    provablyDisjoint(previous, current))
+                if (previous.node == node)
+                {
+                    continue;
+                }
+                // With a memory-mapped console in the program every access keeps its place:
+                // two loads of the device are not independent (a read consumes a key), and a
+                // write to one register is not independent of a read of another.
+                if (!model.usesMemoryMappedIo &&
+                    ((!previous.isStore && !current.isStore) || provablyDisjoint(previous, current)))
                 {
                     continue;
                 }

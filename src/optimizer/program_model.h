@@ -63,6 +63,12 @@ struct ProgramModel
     std::vector<InstrInfo> instructions; ///< Indexed by instruction number (address / 4).
     std::vector<Unit> units;
     std::vector<BasicBlock> blocks;
+
+    /// True if the program builds an address in the memory-mapped console (lui rd, 0x20000, as
+    /// in `li t0, 0x20000000`). Reading or writing a device register has effects of its own, and
+    /// the order of those effects is what the program prints or consumes, so no two memory
+    /// accesses of such a program may change places, however far apart their addresses look.
+    bool usesMemoryMappedIo{false};
 };
 
 /**
