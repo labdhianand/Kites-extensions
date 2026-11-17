@@ -99,6 +99,7 @@ bool ProcessorBase::BlockedOnInput(uint32_t instruction)
     {
         return false;
     }
+    waiting_for_input_ = true;
     emit io_->inputRequested(true);
     return true;
 }
