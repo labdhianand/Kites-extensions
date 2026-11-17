@@ -91,7 +91,7 @@ requested regions (4 rows starting at address `0x0`, then 2 rows starting at
 
 ```
 kites-cli <assembly-file> --suggest [--vm <rv5-...>] [--unroll <n>] [--only-live-registers]
-          [--cold-cache] [--plan-latency <n>] [--out <file>] [--no-verify]
+          [--cold-cache] [--plan-latency <n>] [--input <file>] [--out <file>] [--no-verify]
 ```
 
 Suggests a better instruction order for one of the pipelined processor models, shows it as a
@@ -105,6 +105,7 @@ that the suggestion computes exactly the same result.
 | `--only-live-registers` | Compute array addresses once instead of in every iteration. A loop that indexes memory (`slli t, i, 2; add p, base, t`) steps a pointer instead (`addi p, p, 4`), set up just before the loop; with `--unroll`, the copies also reach their data from the first copy's address with a larger offset (`lw x5, 4(p)`), and the counter steps once. Registers nothing reads after the loop may then end with different values; they are listed and left out of the comparison, while memory and every other register must still match. Without this flag every register must end the same, which leaves little to remove. |
 | `--cold-cache` | Measure with the cache-latency model (L1 128 B, L2 2 KB; +0 / +4 / +20 cycles per L1 hit / L2 hit / memory access) instead of ideal memory. |
 | `--plan-latency <n>` | Extra cycles per load the optimizer should plan for. Defaults to 0, or 4 (the L2 latency) with `--cold-cache`. |
+| `--input <file>` | What the user types, for a program that reads input. The original and the suggestion both get it, and must print the same text (see [IO.md](IO.md)). |
 | `--out <file>` | Write the suggested program to `<file>`. |
 | `--no-verify` | Only print the suggestion; do not run anything. |
 
