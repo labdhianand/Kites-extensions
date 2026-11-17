@@ -48,6 +48,8 @@ void printUsage(const char *programName)
         << "  --cold-cache        measure with cache latencies instead of ideal memory\n"
         << "  --plan-latency <n>  extra cycles per load to plan for (default 0, or 4 with\n"
         << "                      --cold-cache)\n"
+        << "  --input <file>      what the user types, for a program that reads input; the\n"
+        << "                      original and the suggestion must print the same text too\n"
         << "  --out <file>        write the suggested program to <file>\n"
         << "  --no-verify         do not run the programs on the simulator\n";
 }
@@ -132,6 +134,16 @@ int main(int argc, char *argv[])
         else if (arg == "--only-live-registers")
         {
             suggest.allowDeadRegisterChanges = true;
+        }
+        else if (arg == "--input")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "Error: --input requires a file name.\n";
+                printUsage(argv[0]);
+                return 1;
+            }
+            suggest.inputFile = argv[++i];
         }
         else if (arg == "--out")
         {
