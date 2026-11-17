@@ -439,3 +439,49 @@ TYPED_TEST(IoTest, AuipcAddsThePc)
     // 3 nops pad the first nop, so the auipc is the fifth instruction: pc = 16.
     EXPECT_EQ(vm->registers_.ReadGpr(8), 0x1000u + 16u);
 }
+
+// An ecall reads its registers when it retires, so the instructions that set them up need no
+// padding and cause no stall, on every model (the other tests pad every instruction).
+template <typename VmType>
+std::unique_ptr<VmType> runUnpadded(const std::string &source, const std::string &input = "")
+{
+    setupVmStateDirectory();
+    auto vm = std::make_unique<VmType>();
+    std::istringstream stream(source);
+    vm->LoadProgram(assemble(stream));
+    vm->Io().pushRaw(input);
+    vm->DebugRun();
+    return vm;
+}
+
+TYPED_TEST(IoTest, EcallNeedsNoPaddingBeforeIt)
+{
+    auto vm = runUnpadded<TypeParam>(R"(
+        li   a0, 42
+        li   a7, 1
+        ecall
+        li   a7, 5
+        ecall
+        addi s0, a0, 1
+    )",
+                                     "9\n");
+    EXPECT_EQ(vm->Io().output(), "42");
+    EXPECT_EQ(vm->registers_.ReadGpr(8), 10u);
+}
+
+TYPED_TEST(IoTest, AValueJustLoadedCanBePrintedAtOnce)
+{
+    auto vm = runUnpadded<TypeParam>(R"(
+        .data
+        v: .word 1234
+        .text
+        lui  t0, 0x10000
+        nop
+        nop
+        nop
+        lw   a0, 0(t0)
+        li   a7, 1
+        ecall
+    )");
+    EXPECT_EQ(vm->Io().output(), "1234");
+}
