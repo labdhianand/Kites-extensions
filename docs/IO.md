@@ -80,3 +80,28 @@ reads return 0 / -1 / an empty string, but a program polling KBD_STATUS would wa
 `examples/io/`: `hello.s`, `add_two_numbers.s`, `stats.s` (float input) and `echo_chars.s`
 (polling). The NH_* pipelines leave data hazards to the programmer, so on `rv5-nh-nf` / `rv5-nh-f`
 these need `nop`s between dependent instructions like any other program.
+
+## The optimizer and I/O
+
+The reordering optimizer (`kites-cli --suggest`, the Optimizer tab, `kites-bench`) works with
+programs that print and read.
+
+- **Input.** A program that reads is run with the same input every time it is measured: the
+  original on the single-cycle core, and the original and the suggestion on the chosen pipeline.
+  Give it with `--input <file>` on the CLI, or in the Input box of the Optimizer tab (`\n` is
+  Enter). `kites-bench` reads `<name>.in` next to a benchmark.
+- **Same output.** A suggestion is only "identical" if it also prints the same text, on top of
+  leaving the same registers and memory.
+- **No input, no hang.** A program that asks for input that was not given is reported as such,
+  nothing is measured, and no suggestion is offered for applying. A run that does not end within
+  100,000 cycles (an endless loop, or polling for a key nobody presses) is stopped and reported.
+- **Order is kept.** Nothing is moved across an `ecall`. In a program that uses the memory-mapped
+  console (it builds an address with `lui rd, 0x20000`) no two memory accesses change places,
+  because reading a device register consumes a key and the order of writes is what is printed.
+- **No padding for ecall.** An ecall reads `a7` and `a0`-`a2` when it retires, so the
+  instructions that set them up need no gap, and pipelines without hazard detection need no NOPs
+  there.
+
+`benchmarks/read_sum.s` (a loop built around read ecalls) and `benchmarks/poll_echo.s` (a polling
+loop on the keyboard and display) are the I/O workloads. There is little to gain in them, and the
+point is that the result stays correct.
