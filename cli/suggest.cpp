@@ -159,6 +159,18 @@ int RunSuggest(const SuggestOptions &options)
 
     benchmarking::SuggestionRequest request;
     request.source = buffer.str();
+    if (!options.inputFile.empty())
+    {
+        std::ifstream inputFile(options.inputFile);
+        if (!inputFile)
+        {
+            std::cerr << "Error: cannot read '" << options.inputFile << "'.\n";
+            return 1;
+        }
+        std::stringstream input;
+        input << inputFile.rdbuf();
+        request.input = input.str();
+    }
     request.processor = options.processor;
     request.memory =
         options.coldCache ? benchmarking::MemorySetup::ColdCache : benchmarking::MemorySetup::Ideal;
@@ -228,6 +240,11 @@ int RunSuggest(const SuggestOptions &options)
                           ? "identical to the original on the single-cycle processor"
                           : "DIFFERENT from the original")
                   << "\n";
+        if (!suggestion.output.empty())
+        {
+            std::cout << "  output          " << (suggestion.suggestionCorrect ? "the same text" : "different text")
+                      << " is printed (" << suggestion.output.size() << " characters)\n";
+        }
         if (!suggestion.renamedRegisters.empty())
         {
             std::cout << "                  (registers the original never used are not compared)\n";
@@ -239,6 +256,15 @@ int RunSuggest(const SuggestOptions &options)
         if (!suggestion.suggestionCorrect)
         {
             exitCode = 2;
+        }
+    }
+
+    else if (!suggestion.measureProblem.empty())
+    {
+        std::cout << "\nNot measured: " << suggestion.measureProblem << ".\n";
+        if (request.input.empty())
+        {
+            std::cout << "If the program reads input, give it with --input <file>.\n";
         }
     }
 
