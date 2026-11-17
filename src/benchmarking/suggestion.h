@@ -34,6 +34,9 @@ struct SuggestionRequest
 
     /// Run the original and the suggestion on the simulator.
     bool measure{true};
+
+    /// What the user types for a program that reads input. Every run gets the same input.
+    std::string input;
 };
 
 struct Suggestion
@@ -53,10 +56,15 @@ struct Suggestion
     std::vector<unsigned> changedDeadRegisters;
 
     bool measured{false};
+    /// Why nothing was measured, when measuring was asked for but the original did not finish
+    /// (for example, it asks for input that was not given).
+    std::string measureProblem;
+    /// What the original program printed (empty if it prints nothing).
+    std::string output;
     unsigned baselineCycles{0};
     unsigned suggestionCycles{0};
     bool baselineCorrect{false};   ///< the baseline matches the single-cycle processor
-    bool suggestionCorrect{false}; ///< the suggestion matches it too
+    bool suggestionCorrect{false}; ///< the suggestion matches it too (registers, memory and output)
 };
 
 /// True for the pipelined processor models, the only ones a suggestion makes sense for.
