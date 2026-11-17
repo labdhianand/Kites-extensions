@@ -116,16 +116,29 @@ Suggestion makeSuggestion(const SuggestionRequest &request)
 
     if (request.measure)
     {
-        const ProgramRun reference = runProgram(request.source, ProcessorType::RVSS);
-        const ProgramRun before = runProgram(suggestion.baseline, request.processor, request.memory);
-        const ProgramRun after =
-            runProgram(suggestion.result.source, request.processor, request.memory);
+        const ProgramRun reference =
+            runProgram(request.source, ProcessorType::RVSS, MemorySetup::Ideal, request.input);
+        if (!reference.finished())
+        {
+            // Nothing to compare with, so there is nothing to measure.
+            suggestion.measureProblem = describe(reference.end);
+            return suggestion;
+        }
+        const ProgramRun before = runProgram(suggestion.baseline, request.processor, request.memory,
+                                             request.input);
+        const ProgramRun after = runProgram(suggestion.result.source, request.processor,
+                                            request.memory, request.input);
         suggestion.measured = true;
+        suggestion.output = reference.output;
         suggestion.baselineCycles = before.cycles;
         suggestion.suggestionCycles = after.cycles;
-        suggestion.baselineCorrect = sameResult(reference.state, before.state);
-        suggestion.suggestionCorrect = sameResult(reference.state, after.state,
-                                                  optimizer::registersNotCompared(suggestion.result));
+        // The same registers and memory, and the same text printed.
+        suggestion.baselineCorrect = before.finished() && before.output == reference.output &&
+                                     sameResult(reference.state, before.state);
+        suggestion.suggestionCorrect =
+            after.finished() && after.output == reference.output &&
+            sameResult(reference.state, after.state,
+                       optimizer::registersNotCompared(suggestion.result));
     }
     return suggestion;
 }
