@@ -94,6 +94,18 @@ class ProcessorBase : public QObject
     /// it (the GUI console, the CLI), so it outlives the processor when the model is switched.
     std::shared_ptr<IoChannel> io_ = std::make_shared<IoChannel>();
 
+    /// DebugRun gives up after this many cycles (0 = no limit), so a program that never ends, or
+    /// polls for a key nobody will press, cannot hang whoever is running it.
+    uint64_t cycle_limit_{0};
+    bool CycleLimitReached() const
+    {
+        return cycle_limit_ != 0 && cycle_s_ >= cycle_limit_;
+    }
+
+    /// Set when a run stopped because an ecall wanted input that was not there and the machine
+    /// may not wait for it (see BlockedOnInput). Cleared when DebugRun starts.
+    bool waiting_for_input_{false};
+
     /// Set once the program has made an exit syscall; the machine then counts as finished.
     bool exited_{false};
     int exit_code_{0};

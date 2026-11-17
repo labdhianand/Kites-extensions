@@ -76,11 +76,17 @@ void RV5StageVM_Base::Run()
 void RV5StageVM_Base::DebugRun()
 {
     ClearStop();
-    while (!stop_requested_ && (program_counter_ < program_size_ || !is_pipeline_drained()))
+    waiting_for_input_ = false;
+    while (!stop_requested_ && (program_counter_ < program_size_ || !is_pipeline_drained()) &&
+           !CycleLimitReached())
     {
 #ifdef VM_DEBUG_PRINTS
         print_pipeline_registers_debug();
 #endif
+        if (wait_for_input())
+        {
+            break; // a step would do nothing, so this run is over
+        }
         Step();
         std::cerr << "Cycle: " << cycle_s_ << " | PC: 0x" << std::hex << program_counter_
                   << std::dec << std::endl;

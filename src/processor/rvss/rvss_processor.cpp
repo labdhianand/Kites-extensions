@@ -890,7 +890,8 @@ void RVSSProcessor::WriteBackCsr()
 void RVSSProcessor::DebugRun()
 {
     ClearStop();
-    while (!stop_requested_ && program_counter_ < program_size_)
+    waiting_for_input_ = false;
+    while (!stop_requested_ && program_counter_ < program_size_ && !CycleLimitReached())
     {
         current_delta_.old_pc = program_counter_;
         if (std::find(breakpoints_.begin(), breakpoints_.end(), program_counter_) ==
