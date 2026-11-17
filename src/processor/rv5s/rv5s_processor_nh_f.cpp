@@ -28,9 +28,12 @@ RV5StageProcessorNHF::RV5StageProcessorNHF() : RV5StageVM_Base()
 {
 // Reset components and history
 #ifndef DISABLE_GUI
-    circuit_scene_ = std::make_unique<Kites::RV5StageVM_NH_F_CircuitScene>();
-    connect(this, &ProcessorBase::updateCircuitStateSignal, circuit_scene_.get(),
+    if (!g_headlessProcessors)
+    {
+        circuit_scene_ = std::make_unique<Kites::RV5StageVM_NH_F_CircuitScene>();
+        connect(this, &ProcessorBase::updateCircuitStateSignal, circuit_scene_.get(),
             &Kites::RV5StageVM_NH_F_CircuitScene::updateCircuitState);
+    }
 #endif
     Reset();
 

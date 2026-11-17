@@ -32,9 +32,12 @@ RVSSProcessor::RVSSProcessor() : ProcessorBase()
     DumpRegisters(globals::registers_dump_file_path, registers_);
     DumpState(globals::vm_state_dump_file_path);
 #ifndef DISABLE_GUI
-    circuit_scene_ = std::make_unique<Kites::RVSSCircuitScene>();
-    connect(this, &ProcessorBase::updateCircuitStateSignal, circuit_scene_.get(),
+    if (!g_headlessProcessors)
+    {
+        circuit_scene_ = std::make_unique<Kites::RVSSCircuitScene>();
+        connect(this, &ProcessorBase::updateCircuitStateSignal, circuit_scene_.get(),
             &Kites::RVSSCircuitScene::updateCircuitState, Qt::QueuedConnection);
+    }
 #endif
 
     active_wires_.append("IM_to_PC_pc");
