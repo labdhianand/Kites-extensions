@@ -147,14 +147,6 @@ QWidget *OptimizerTab::buildControls()
                                  "pipelines with hazard detection, with the cold cache.");
     addField("Load latency", m_plannedLatency);
 
-    m_input = new QLineEdit(bar);
-    m_input->setPlaceholderText("e.g. 3 4");
-    m_input->setFixedWidth(110);
-    m_input->setToolTip("What the user types, for a program that reads input (ecall 5, 6, 7, 8, "
-                        "12 or 63, or the memory-mapped keyboard).\nUse \\n for Enter. The original "
-                        "and the suggestion get the same input, and must print the same text.");
-    addField("Input", m_input);
-
     row->addStretch(1);
 
     m_applyButton = new QPushButton("Apply to editor", bar);
@@ -169,7 +161,31 @@ QWidget *OptimizerTab::buildControls()
     connect(m_suggestButton, &QPushButton::clicked, this, &OptimizerTab::suggest);
     connect(m_applyButton, &QPushButton::clicked, this, &OptimizerTab::applySuggestion);
     connect(m_memory, &QComboBox::currentIndexChanged, this, &OptimizerTab::memoryChanged);
-    return bar;
+
+    // The input for a program that reads gets a row of its own: in the bar above it squeezed the
+    // other controls, and it is the one field that is wider than a number.
+    auto *inputBar = new QFrame(this);
+    inputBar->setObjectName("optimizerControls");
+    auto *inputRow = new QHBoxLayout(inputBar);
+    inputRow->setContentsMargins(10, 0, 10, 6);
+    inputRow->setSpacing(6);
+    m_input = new QLineEdit(inputBar);
+    m_input->setPlaceholderText("What the program reads, for example: 5 12 7 3 20 1 8 4");
+    m_input->setClearButtonEnabled(true);
+    m_input->setToolTip("What the user types, for a program that reads input (ecall 5, 6, 7, 8, "
+                        "12 or 63, or the memory-mapped keyboard).\nUse \\n for Enter. The original "
+                        "and the suggestion get the same input, and must print the same text.");
+    inputRow->addWidget(new QLabel("Input", inputBar));
+    inputRow->addWidget(m_input, 1);
+    connect(m_input, &QLineEdit::returnPressed, this, &OptimizerTab::suggest);
+
+    auto *controls = new QWidget(this);
+    auto *controlsLayout = new QVBoxLayout(controls);
+    controlsLayout->setContentsMargins(0, 0, 0, 0);
+    controlsLayout->setSpacing(0);
+    controlsLayout->addWidget(bar);
+    controlsLayout->addWidget(inputBar);
+    return controls;
 }
 
 QWidget *OptimizerTab::metricCard(QLabel *&value, const QString &label)
