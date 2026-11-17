@@ -111,6 +111,9 @@ ProgramRun runProgram(const std::string &source, ProcessorType type, MemorySetup
     const AssembledProgram program = assemble(stream);
 
     QuietOutput quiet;
+    // This runs on a worker thread when the GUI asks for it, and a circuit diagram's widgets
+    // cannot be made there.
+    const HeadlessProcessors headless;
     std::unique_ptr<ProcessorBase> vm = createProcessor(type);
     configureMemory(*vm, memory);
     vm->LoadProgram(program);
