@@ -209,7 +209,25 @@ int main(int argc, char *argv[])
         {
             const std::string name = path.stem().string();
             const std::string source = readFile(path);
-            const ProgramState reference = runProgram(source, ProcessorType::RVSS).state;
+            // What the user types, for a program that reads input: <name>.in next to it.
+            std::filesystem::path inputPath = path;
+            inputPath.replace_extension(".in");
+            const std::string input =
+                std::filesystem::exists(inputPath) ? readFile(inputPath) : std::string();
+            const ProgramRun referenceRun =
+                runProgram(source, ProcessorType::RVSS, MemorySetup::Ideal, input);
+            if (!referenceRun.finished())
+            {
+                std::cerr << name << ": " << describe(referenceRun.end) << "\n";
+                return 1;
+            }
+            const ProgramState &reference = referenceRun.state;
+            // The same registers and memory, and the same text printed.
+            auto matches = [&](const ProgramRun &run, const std::vector<unsigned> &ignored = {})
+            {
+                return run.finished() && run.output == referenceRun.output &&
+                       sameResult(reference, run.state, ignored);
+            };
 
             for (const VariantInfo &info : kVariants)
             {
@@ -238,20 +256,19 @@ int main(int argc, char *argv[])
                     m.unrolledLoops += loop.unrolled ? 1 : 0;
                 }
 
-                const ProgramRun before = runProgram(original, info.processor, setting.setup);
+                const ProgramRun before = runProgram(original, info.processor, setting.setup, input);
                 const ProgramRun afterReorder =
-                    runProgram(reordered.source, info.processor, setting.setup);
+                    runProgram(reordered.source, info.processor, setting.setup, input);
                 const ProgramRun afterUnroll =
-                    runProgram(unrolled.source, info.processor, setting.setup);
-                const ProgramRun afterFold = runProgram(folded.source, info.processor, setting.setup);
+                    runProgram(unrolled.source, info.processor, setting.setup, input);
+                const ProgramRun afterFold = runProgram(folded.source, info.processor, setting.setup, input);
                 m.original = before.cycles;
                 m.reordered = afterReorder.cycles;
                 m.unrolled = afterUnroll.cycles;
                 m.folded = afterFold.cycles;
-                m.correct = sameResult(reference, before.state) &&
-                            sameResult(reference, afterReorder.state, notCompared(reordered)) &&
-                            sameResult(reference, afterUnroll.state, notCompared(unrolled)) &&
-                            sameResult(reference, afterFold.state, notCompared(folded));
+                m.correct = matches(before) && matches(afterReorder, notCompared(reordered)) &&
+                            matches(afterUnroll, notCompared(unrolled)) &&
+                            matches(afterFold, notCompared(folded));
                 allCorrect = allCorrect && m.correct;
 
                 std::cerr << std::left << std::setw(13) << setting.title << std::setw(18) << name
