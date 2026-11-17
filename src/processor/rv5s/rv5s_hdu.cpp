@@ -37,6 +37,14 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
     // --- 1. Extract Source Register Indices from IF/ID Instruction (Dependent) ---
     uint32_t instruction = if_id_reg.instruction;
 
+    // An ecall reads a7 and a0-a2 when it retires, after every older instruction has written its
+    // result, so it never has to wait for one.
+    constexpr uint32_t kEcall = 0x00000073;
+    if (instruction == kEcall)
+    {
+        return STALL_NONE;
+    }
+
     // GPR Source Registers (rs1/rs2 fields)
     uint8_t if_id_rs1 = (instruction >> 15) & 0x1F;
     uint8_t if_id_rs2 = (instruction >> 20) & 0x1F;

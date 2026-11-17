@@ -21,7 +21,10 @@ size_t registerSlot(RegRef reg)
 TimelineBuilder::Placement TimelineBuilder::place(const InstrInfo &info)
 {
     int earliestSlot = m_previousSlot + 1;
-    for (size_t s = 0; s < info.sourceCount; ++s)
+    // An ecall reads its registers when it retires, after every older instruction has written
+    // its result (see the simulator's handling of ecall), so it never waits for one.
+    const bool readsWhenRetiring = info.klass == InstrClass::System && info.endsBlock;
+    for (size_t s = 0; s < info.sourceCount && !readsWhenRetiring; ++s)
     {
         const auto &write = m_lastWrite[registerSlot(info.sources[s])];
         if (!write)

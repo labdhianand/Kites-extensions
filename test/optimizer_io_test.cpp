@@ -117,3 +117,21 @@ TEST(OptimizerIo, ADifferentOutputIsNotIdentical)
     EXPECT_TRUE(sameResult(a.state, a.state));
     EXPECT_NE(a.output, b.output);
 }
+
+// The ecall reads a7 and a0 when it retires, so a pipeline that cannot detect hazards needs no
+// padding for them.
+TEST(OptimizerIo, NoPaddingIsNeededBeforeAnEcall)
+{
+    setupVmStateDirectory();
+    SuggestionRequest request;
+    request.source = "li a0, 5\nli a7, 1\necall\n";
+    for (ProcessorType model : {ProcessorType::RV5Stage_NH_NF, ProcessorType::RV5Stage_NH_F})
+    {
+        request.processor = model;
+        const Suggestion suggestion = makeSuggestion(request);
+        EXPECT_EQ(suggestion.paddingAdded, 0);
+        EXPECT_TRUE(suggestion.measured) << suggestion.measureProblem;
+        EXPECT_EQ(suggestion.output, "5");
+        EXPECT_TRUE(suggestion.baselineCorrect);
+    }
+}
