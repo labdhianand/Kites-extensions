@@ -13,6 +13,12 @@ Small RISC-V programs used to measure the code-reordering optimizer. The measure
 | `matrix_multiply.s` | 4x4 integer matrix product | Nested loops; only the innermost is unrollable |
 | `pointer_chase.s` | Sums a linked list | Every load depends on the previous one: nothing to overlap |
 | `independent_loads.s` | Eight independent squares | Straight-line code written in "natural" order |
+| `read_sum.s` | Reads eight integers and prints their sum | A loop built around `ecall`: nothing may move across one |
+| `poll_echo.s` | Polls the memory-mapped keyboard, echoes keys until `q` | Device accesses must keep their order |
+
+A program that reads input has a file of the same name ending in `.in` next to it: what the user
+types. Every version of it gets that input, and has to print the same text as the original as well
+as leave the same registers and memory.
 
 Every program keeps its data in `.data`, which the simulator loads straight into main memory, so
 it starts cold in the caches. Each one reaches its data with `lui x10, 0x10000` (the data section
