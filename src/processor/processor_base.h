@@ -37,6 +37,34 @@ namespace Kites
 {
 struct SyscallEffect;
 
+/**
+ * @brief Whether a processor built on this thread draws a circuit diagram.
+ *
+ * The diagram is made of Qt widgets, which may only be created and destroyed on the thread that
+ * runs the window. Code that runs a processor on another thread just to measure a program (the
+ * optimizer) builds it inside a HeadlessProcessors scope, so no diagram is made. On macOS a
+ * processor built on a worker thread otherwise brings the whole application down.
+ */
+inline thread_local bool g_headlessProcessors = false;
+
+class HeadlessProcessors
+{
+  public:
+    HeadlessProcessors() : m_previous(g_headlessProcessors)
+    {
+        g_headlessProcessors = true;
+    }
+    ~HeadlessProcessors()
+    {
+        g_headlessProcessors = m_previous;
+    }
+    HeadlessProcessors(const HeadlessProcessors &) = delete;
+    HeadlessProcessors &operator=(const HeadlessProcessors &) = delete;
+
+  private:
+    bool m_previous;
+};
+
 struct RegisterChange
 {
     unsigned int reg_index;
