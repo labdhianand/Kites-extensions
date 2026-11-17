@@ -489,15 +489,29 @@ TEST(OptimizerPadOnlySimulation, EveryBenchmarkIsCorrectOnceItIsPadded)
         const std::string source = buffer.str();
         SCOPED_TRACE(entry.path().filename().string());
 
-        const Snapshot reference = runOn<RVSSProcessor>(assembleSource(source)).snapshot;
-        const auto noForwarding =
-            runOn<RV5StageProcessorNHNF>(assembleSource(padded(source, PipelineVariant::NH_NF)));
-        const auto forwarding =
-            runOn<RV5StageProcessorNHF>(assembleSource(padded(source, PipelineVariant::NH_F)));
+        // What the user types, for a benchmark that reads input (read_sum.in next to read_sum.s).
+        std::filesystem::path inputPath = entry.path();
+        inputPath.replace_extension(".in");
+        std::string input;
+        if (std::filesystem::exists(inputPath))
+        {
+            std::ifstream inputFile(inputPath);
+            std::stringstream inputBuffer;
+            inputBuffer << inputFile.rdbuf();
+            input = inputBuffer.str();
+        }
+
+        const Snapshot reference =
+            runOn<RVSSProcessor>(assembleSource(source), nullptr, input).snapshot;
+        const auto noForwarding = runOn<RV5StageProcessorNHNF>(
+            assembleSource(padded(source, PipelineVariant::NH_NF)), nullptr, input);
+        const auto forwarding = runOn<RV5StageProcessorNHF>(
+            assembleSource(padded(source, PipelineVariant::NH_F)), nullptr, input);
         EXPECT_EQ(noForwarding.snapshot.gprs, reference.gprs) << "NH_NF";
         EXPECT_EQ(forwarding.snapshot.gprs, reference.gprs) << "NH_F";
 
-        if (runOn<RV5StageProcessorNHNF>(assembleSource(source)).snapshot.gprs != reference.gprs)
+        if (runOn<RV5StageProcessorNHNF>(assembleSource(source), nullptr, input).snapshot.gprs !=
+            reference.gprs)
         {
             ++wrongUnpaddedCount;
         }

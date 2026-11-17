@@ -59,7 +59,8 @@ class QuietOutput
 // to the processor before the program is loaded (to set the memory timing or the caches).
 template <typename Vm>
 RunResult runOn(const Kites::AssembledProgram &program,
-                const std::function<void(Vm &)> &configure = nullptr)
+                const std::function<void(Vm &)> &configure = nullptr,
+                const std::string &input = "")
 {
     QuietOutput quiet;
     Vm vm;
@@ -68,6 +69,10 @@ RunResult runOn(const Kites::AssembledProgram &program,
         configure(vm);
     }
     vm.LoadProgram(program);
+    // A program that reads input gets `input` and never waits for more, and no run lasts for ever.
+    vm.Io().setBlocking(false);
+    vm.Io().pushRaw(input);
+    vm.cycle_limit_ = 2'000'000;
     vm.DebugRun();
 
     RunResult result;
