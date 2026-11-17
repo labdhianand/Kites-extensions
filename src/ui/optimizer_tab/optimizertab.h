@@ -10,6 +10,7 @@
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QLineEdit;
 class QSpinBox;
 class QCheckBox;
 
@@ -77,6 +78,7 @@ class OptimizerTab : public KitesTab
     QComboBox *m_unroll{nullptr};
     QCheckBox *m_onlyLiveRegisters{nullptr};
     QSpinBox *m_plannedLatency{nullptr};
+    QLineEdit *m_input{nullptr};
     QPushButton *m_suggestButton{nullptr};
     QPushButton *m_applyButton{nullptr};
 

@@ -9,6 +9,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
+#include <QLineEdit>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -145,6 +146,14 @@ QWidget *OptimizerTab::buildControls()
     m_plannedLatency->setToolTip("Extra cycles to plan for on every load.\nOnly matters on "
                                  "pipelines with hazard detection, with the cold cache.");
     addField("Load latency", m_plannedLatency);
+
+    m_input = new QLineEdit(bar);
+    m_input->setPlaceholderText("e.g. 3 4");
+    m_input->setFixedWidth(110);
+    m_input->setToolTip("What the user types, for a program that reads input (ecall 5, 6, 7, 8, "
+                        "12 or 63, or the memory-mapped keyboard).\nUse \\n for Enter. The original "
+                        "and the suggestion get the same input, and must print the same text.");
+    addField("Input", m_input);
 
     row->addStretch(1);
 
@@ -311,6 +320,7 @@ void OptimizerTab::setBusy(bool busy)
     m_unroll->setEnabled(!busy);
     m_onlyLiveRegisters->setEnabled(!busy);
     m_plannedLatency->setEnabled(!busy);
+    m_input->setEnabled(!busy);
     if (busy)
     {
         m_applyButton->setEnabled(false);
@@ -364,6 +374,7 @@ void OptimizerTab::suggest()
     request.unrollFactor = m_unroll->currentData().toInt();
     request.allowDeadRegisterChanges = m_onlyLiveRegisters->isChecked();
     request.plannedLatency = m_plannedLatency->value();
+    request.input = m_input->text().replace("\\n", "\n").toStdString();
 
     m_originalView->setTintedLines({});
     m_suggestedView->showProgram(QString(), {});
@@ -507,6 +518,27 @@ void OptimizerTab::suggestionFinished()
     {
         notes << "No better order was found.";
     }
+    if (!suggestion.measured)
+    {
+        // The original could not be run to a result (it asks for input, say), so there is
+        // nothing to compare the suggestion with, and it is not offered for applying.
+        notes << QString("Not measured: %1.%2")
+                     .arg(QString::fromStdString(suggestion.measureProblem))
+                     .arg(m_input->text().isEmpty() ? " If it reads input, type it in the Input box."
+                                                    : QString());
+        m_notes->setText(notes.join("  "));
+        m_originalCyclesLabel->setText("original, cycles");
+        m_originalCycles->setText("-");
+        m_suggestedCycles->setText("-");
+        m_change->setText("-");
+        m_result->setText("Not verified");
+        m_result->setToolTip("The suggestion was not run, so it is not known to match the original.");
+        m_applyButton->setEnabled(false);
+        m_improved = false;
+        m_correct = false;
+        refreshColours();
+        return;
+    }
     m_notes->setText(notes.join("  "));
 
     m_originalCyclesLabel->setText(suggestion.paddingAdded > 0 ? "padded original, cycles"
@@ -517,7 +549,7 @@ void OptimizerTab::suggestionFinished()
     m_result->setText(suggestion.suggestionCorrect ? "Identical" : "Different");
     m_result->setToolTip(suggestion.suggestionCorrect
                              ? "The suggestion leaves the same registers and memory as the "
-                               "original on the single-cycle processor."
+                               "original on the single-cycle processor, and prints the same text."
                              : "The suggestion computed a different result. Please report this.");
     m_improved = suggestion.suggestionCycles < suggestion.baselineCycles;
     m_correct = suggestion.suggestionCorrect;
