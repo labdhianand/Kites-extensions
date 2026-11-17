@@ -25,21 +25,25 @@ namespace
 constexpr uint64_t kDataStart = 0x10000000;
 constexpr uint64_t kDataBytesCaptured = 1024;
 
-// The simulator prints a line per cycle while it runs; that is not wanted in a report.
+// The simulator prints a line per cycle while it runs (to stdout and stderr); that is not wanted
+// in a report.
 class QuietOutput
 {
   public:
-    QuietOutput() : m_previous(std::cout.rdbuf(m_sink.rdbuf()))
+    QuietOutput()
+        : m_previous(std::cout.rdbuf(m_sink.rdbuf())), m_previousErr(std::cerr.rdbuf(m_sink.rdbuf()))
     {
     }
     ~QuietOutput()
     {
         std::cout.rdbuf(m_previous);
+        std::cerr.rdbuf(m_previousErr);
     }
 
   private:
     std::ostringstream m_sink;
     std::streambuf *m_previous;
+    std::streambuf *m_previousErr;
 };
 
 std::unique_ptr<ProcessorBase> createProcessor(ProcessorType type)
@@ -86,7 +90,22 @@ std::string describe(MemorySetup setup)
     return "ideal memory (every access takes one cycle)";
 }
 
-ProgramRun runProgram(const std::string &source, ProcessorType type, MemorySetup memory)
+std::string describe(RunEnd end)
+{
+    switch (end)
+    {
+    case RunEnd::NeedsInput:
+        return "the program asks for input that was not given";
+    case RunEnd::CycleLimit:
+        return "the program did not end within " + std::to_string(kCycleLimit) +
+               " cycles (does it loop for ever, or wait for a key that is never pressed?)";
+    default:
+        return "the program finished";
+    }
+}
+
+ProgramRun runProgram(const std::string &source, ProcessorType type, MemorySetup memory,
+                      const std::string &input, uint64_t cycleLimit)
 {
     std::istringstream stream(source);
     const AssembledProgram program = assemble(stream);
@@ -95,9 +114,17 @@ ProgramRun runProgram(const std::string &source, ProcessorType type, MemorySetup
     std::unique_ptr<ProcessorBase> vm = createProcessor(type);
     configureMemory(*vm, memory);
     vm->LoadProgram(program);
+    vm->cycle_limit_ = cycleLimit;
+    vm->Io().setBlocking(false); // never wait for a user who is not there
+    // The last word needs the Enter that ends it, or a read would wait for more digits.
+    vm->Io().pushRaw(!input.empty() && input.back() != '\n' ? input + "\n" : input);
     vm->DebugRun();
 
     ProgramRun run;
+    run.output = vm->Io().output();
+    run.end = vm->waiting_for_input_ ? RunEnd::NeedsInput
+              : vm->CycleLimitReached() ? RunEnd::CycleLimit
+                                        : RunEnd::Finished;
     for (size_t i = 0; i < 32; ++i)
     {
         run.state.gprs[i] = vm->registers_.ReadGpr(i);
