@@ -373,3 +373,28 @@ TEST(OptimizerDependencyGraphInvariants, HoldForAllExamplePrograms)
     EXPECT_GT(blockCount, 20u);
     EXPECT_GT(edgeCount, 50u);
 }
+
+// Device registers have effects of their own, so a program that uses the memory-mapped console
+// keeps all its memory accesses in order. The same code on an ordinary address stays free to be
+// reordered, so this is not just a general slowdown.
+TEST(DependencyGraph, ConsoleAccessesKeepTheirOrder)
+{
+    auto program = [](const char *base)
+    {
+        return std::string("lui x5, ") + base + "\n" +
+               "lw x6, 0(x5)\n"   // node 1: status
+               "lw x7, 4(x5)\n"   // node 2: data
+               "sw x7, 12(x5)\n"; // node 3: display
+    };
+
+    const Analysis console = analyse(program("0x20000"));
+    EXPECT_TRUE(console.model.usesMemoryMappedIo);
+    EXPECT_TRUE(hasAnyEdge(console.graph, 1, 2)); // two loads, but reading a device consumes
+    EXPECT_TRUE(hasAnyEdge(console.graph, 1, 3)); // a write to one register vs a read of another
+    EXPECT_TRUE(hasAnyEdge(console.graph, 2, 3));
+
+    const Analysis ordinary = analyse(program("0x10000"));
+    EXPECT_FALSE(ordinary.model.usesMemoryMappedIo);
+    EXPECT_FALSE(hasAnyEdge(ordinary.graph, 1, 2)); // two loads never conflict
+    EXPECT_FALSE(hasAnyEdge(ordinary.graph, 1, 3)); // different words of the same array
+}

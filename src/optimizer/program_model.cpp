@@ -4,6 +4,8 @@
  */
 #include "optimizer/program_model.h"
 
+#include "processor/mmio_console.h"
+
 namespace Kites
 {
 namespace optimizer
@@ -94,6 +96,17 @@ ProgramModel buildProgramModel(const AssembledProgram &program)
     for (size_t i = 0; i < program.text_buffer.size(); ++i)
     {
         model.instructions.push_back(decodeInstruction(program.text_buffer[i], i * 4));
+    }
+
+    for (const InstrInfo &info : model.instructions)
+    {
+        // lui: an upper immediate with no register source and no pc (auipc has the same class).
+        const bool isLui = info.klass == InstrClass::Alu && info.sourceCount == 0 &&
+                           info.dest.isValid() && !info.readsPc;
+        if (isLui && static_cast<uint32_t>(info.imm) == kConsoleBase)
+        {
+            model.usesMemoryMappedIo = true;
+        }
     }
 
     model.units = buildUnits(program, model.instructions);
